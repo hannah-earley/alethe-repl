@@ -17,7 +17,7 @@ extra-source-files:  CHANGELOG.md
 
 executable Kappa
   main-is:             Main.hs
-  -- other-modules:
+  other-modules:       Kappa
   -- other-extensions:
   build-depends:       base ^>=4.11.1.0, parsec ^>=3.1
   hs-source-dirs:      src
