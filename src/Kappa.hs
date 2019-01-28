@@ -75,10 +75,14 @@ data Term = Atom String
 data Definition = Terminus [Term]
                 | Rule { lhs :: [Context]
                        , rhs :: [Context]
-                       , rules :: [Context]
+                       , decls :: [Declaration]
                        , defs :: [Definition] 
                        }
                 deriving (Show)
+
+data Declaration = DeclContext Term [Term]
+                 | DeclRule [Term] [Term]
+                 deriving (Show)
 
 data Context = Context Term [Term]
              | Phantom [Term]
@@ -134,37 +138,36 @@ offside col = do col' <- getCol
                     then return ()
                     else parserFail "indentation error"
 
-def :: Stream s m Char => ParsecT s u m Definition
-def = getCol >>= def'
-def' col = choice
-    [ symbol "|-" >> Terminus <$> manyTill term semi
-    , party >>= eqDef
-    , context >>= \lhs -> case lhs of
-           Context c p -> eqDef [lhs]
-           Phantom t -> choice
-               [ try (symbol "-|") >> semi >> pure (Terminus t)
-               , eqDef [lhs]
-               , inDef t
-               ]
+decl :: Stream s m Char => ParsecT s u m (Either Declaration Definition)
+decl = getCol >>= decl'
+
+decl' :: Stream s m Char => Column -> ParsecT s u m (Either Declaration Definition)
+decl' col = choice
+    [ symbol "|-" >> Right . Terminus <$> manyTill term semi
+    , context >>= goSingle
+    , party >>= goMulti
     ]
-  where party = braces (sepBy context' semi)
-        party' = party <|> ((:[]) <$> context)
-        eqDef lhs = symbol "=" >> party' >>= go lhs
-        inDef lhs = do
-            op <- inOp
-            rhs <- many term
-            go [Phantom$ [op] ++ lhs ++ [termTerm]]
-               [Phantom$ [termTerm] ++ rhs ++ [op]]
-        inOp = choice [ between bt bt (fudge <$> many term)
-                      , Atom <$> operator ]
-        fudge [t] = t
-        fudge ts = Compound ts
-        go lhs rhs = choice [ semi >> pure (Rule lhs rhs [] [])
-                            , colon >> uncurry (Rule lhs rhs) <$> subRules col ]
-        bt = symbol "`"
+  where
+    party = braces (sepBy context' semi) <|> ((:[]) <$> context)
+    single [t] = pure t
+    single _   = unexpected "group party"
 
-subRules :: Stream s m Char => Int -> ParsecT s u m ([Context],[Definition])
-subRules col = partitionEithers <$> many (offside col >> subRule)
+    infOp = between bt bt (fudge <$> many term) <|> (Atom <$> operator)
+    bt = symbol "`"
+    fudge [t] = t
+    fudge ts = Compound ts
 
-subRule :: Stream s m Char => ParsecT s u m (Either Context Definition)
-subRule = undefined
+    goSingle (Context c lhs) = choice
+        [ dot >> (pure . Left $ DeclContext c lhs)
+        , goMulti [Context c lhs] ]
+    goSingle (Phantom lhs) = choice
+        [ do { op <- infOp; rhs <- many term; goIn lhs op rhs }
+        , symbol "=" >> many term >>= goEq lhs ]
+    goMulti lhs = symbol "=" >> party >>= goDef lhs
+
+    goEq lhs rhs = choice [ dot >> (pure . Left $ DeclRule lhs rhs)
+                          , goDef [Phantom lhs] [Phantom rhs] ]
+    goIn lhs op rhs = goEq ([op] ++ lhs ++ [termTerm]) ([termTerm] ++ rhs ++ [op])
+    goDef lhs rhs = choice [ semi >> (pure . Right $ Rule lhs rhs [] [])
+                           , colon >> Right . uncurry (Rule lhs rhs) <$> goDecl ]
+    goDecl = partitionEithers <$> many (offside col >> decl)
