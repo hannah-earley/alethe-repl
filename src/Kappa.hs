@@ -57,13 +57,34 @@ semiSep1 = T.semiSep1 lexer
 commaSep = T.commaSep lexer
 commaSep1 = T.commaSep1 lexer
 
+identNotOp = try (do c <- try operator
+                     unexpected ("operator " ++ show c)
+                  <|> return ()
+                 ) >> identifier
 
 
 
 
-data Term = Atom String | Var String | Asymm Term Term | Compound [Term]
-    deriving (Show)
 
+data Term = Atom String
+          | Var String
+          | Asymm Term Term
+          | Compound [Term]
+          deriving (Show)
+
+data Definition = Terminus [Term]
+                | Rule { lhs :: [Context]
+                       , rhs :: [Context]
+                       , rules :: [Context]
+                       , defs :: [Definition] 
+                       }
+                deriving (Show)
+
+data Context = Context Term [Term]
+             | Phantom [Term]
+             deriving (Show)
+
+termTerm = Compound []
 atomZero = Atom "Z"
 atomSucc = Atom "S"
 atomNil = Atom "Nil"
@@ -71,36 +92,20 @@ atomCons = Atom "Cons"
 atomPlus = Atom "Plus"
 atomMinus = Atom "Minus"
 asymmDollar = Asymm atomPlus atomMinus
-nat n | n < 0 = error "Natural must be non-negative"
-      | n == 0 = atomZero
-      | otherwise = Compound [ atomSucc, nat (n-1) ]
+nat n = if n <= 0 then atomZero else Compound [ atomSucc, nat (n-1) ]
 cons car cdr = Compound [atomCons, car, cdr]
 atomChar c = Atom [c]
 
-term = choice [ sugar <?> "literal"
-              , goId <$> identifier <?> "identifier"
-              , parens goParen <?> "compound term"
+term :: Stream s m Char => ParsecT s u m Term
+term = choice [ symbol "$" >> pure asymmDollar
+              , char '#' >> Atom <$> (stringLiteral <|> identifier)
+              , natural >>= pure . nat
+              , stringLiteral >>= pure . goStr
+              , brackets (option atomNil goCar) <?> "list"
+              -- ^sugar
+              , identNotOp >>= pure . goId <?> "identifier"
+              , parens goComp <?> "compound term"
               ]
-  where
-    goId name@(x:_)
-        | isLower x = Var name
-        | otherwise = Atom name
-    goParen = option (Compound []) $ term >>= goParen'
-    goParen' x = choice [ symbol "!" >> Asymm x <$> term
-                        , Compound . (x:) <$> many term ]
-    goAsymm = (<?> "Asymmetry") $ do
-        lhs <- term
-        symbol "!"
-        rhs <- term
-        return $ Asymm lhs rhs
-    goComp = Compound <$> many term <?> "Compound Term"
-
-sugar = choice [ const asymmDollar <$> symbol "$"
-               , Atom <$> (char '#' >> (stringLiteral <|> identifier))
-               , nat <$> natural
-               , goStr <$> stringLiteral
-               , brackets $ option atomNil goCar
-               ]
   where
     goStr [] = atomNil
     goStr (c:cs) = cons (atomChar c) (goStr cs)
@@ -108,16 +113,46 @@ sugar = choice [ const asymmDollar <$> symbol "$"
     goCar = do { car <- term; cdr <- goList;
                  return $ cons car cdr }
     goCdr = option atomNil $ symbol "." >> term
+    goId name@(x:_) = if isLower x then Var name else Atom name
+    goComp = option (Compound []) $ term >>= goComp'
+    goComp' x = choice [ symbol "!" >> Asymm x <$> term
+                        , Compound . (x:) <$> many term ]
 
-data Definition = Terminus [Term]
-                | Rule [Context] ([Definition],[Context]) [Context]
-                deriving (Show)
-data Context = Context Term [Term]
-                deriving (Show)
+context :: Stream s m Char => ParsecT s u m Context
+context = option (Phantom []) $ do
+            t <- term
+            choice [ symbol "|" >> Context t <$> many term
+                   , Phantom . (t:) <$> many term ]
 
-defLeft = choice [ symbol "|-" >> Terminus <$> manyTill term semi
-                 , do { l <- braces (sepBy ctxt semi); symbol "="; defRight l }
-                 , undefined
-                 ]
-defRight lhs = undefined
-ctxt = do { c <- sugar; t <- many term; return $ Context c t }
+context' :: Stream s m Char => ParsecT s u m Context
+context' = do { c <- term; symbol "|"; Context c <$> many term }
+
+def :: Stream s m Char => ParsecT s u m Definition
+def = choice [ symbol "|-" >> Terminus <$> manyTill term semi
+             , party >>= eqDef
+             , context >>= \lhs -> case lhs of
+                    Context c p -> eqDef [lhs]
+                    Phantom t -> choice
+                        [ try (symbol "-|") >> semi >> pure (Terminus t)
+                        , eqDef [lhs]
+                        , inDef t
+                        ]
+             ]
+  where party = braces (sepBy context' semi)
+        party' = party <|> ((:[]) <$> context)
+        eqDef lhs = symbol "=" >> party' >>= go lhs
+        inDef lhs = do
+            op <- inOp
+            rhs <- many term
+            go [Phantom$ [op] ++ lhs ++ [termTerm]]
+               [Phantom$ [termTerm] ++ rhs ++ [op]]
+        inOp = choice [ between bt bt (fudge <$> many term)
+                      , Atom <$> operator ]
+        fudge [t] = t
+        fudge ts = Compound ts
+        go lhs rhs = choice [ semi >> pure (Rule lhs rhs [] [])
+                            , colon >> uncurry (Rule lhs rhs) <$> subRules ]
+        bt = symbol "`"
+
+subRules :: Stream s m Char => ParsecT s u m ([Context],[Definition])
+subRules = undefined
