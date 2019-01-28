@@ -7,6 +7,7 @@ import qualified Text.Parsec.Char as C
 import qualified Text.Parsec.Token as T
 -- import Text.Parsec.Combinator
 import Data.Char
+import Data.Either (partitionEithers)
 
 lexer = T.makeTokenParser kappaStyle
 kappaStyle = T.LanguageDef
@@ -61,7 +62,6 @@ identNotOp = try (do c <- try operator
                      unexpected ("operator " ++ show c)
                   <|> return ()
                  ) >> identifier
-
 
 
 
@@ -127,17 +127,26 @@ context = option (Phantom []) $ do
 context' :: Stream s m Char => ParsecT s u m Context
 context' = do { c <- term; symbol "|"; Context c <$> many term }
 
+
+getCol = sourceColumn . statePos <$> getParserState
+offside col = do col' <- getCol
+                 if col' > col
+                    then return ()
+                    else parserFail "indentation error"
+
 def :: Stream s m Char => ParsecT s u m Definition
-def = choice [ symbol "|-" >> Terminus <$> manyTill term semi
-             , party >>= eqDef
-             , context >>= \lhs -> case lhs of
-                    Context c p -> eqDef [lhs]
-                    Phantom t -> choice
-                        [ try (symbol "-|") >> semi >> pure (Terminus t)
-                        , eqDef [lhs]
-                        , inDef t
-                        ]
-             ]
+def = getCol >>= def'
+def' col = choice
+    [ symbol "|-" >> Terminus <$> manyTill term semi
+    , party >>= eqDef
+    , context >>= \lhs -> case lhs of
+           Context c p -> eqDef [lhs]
+           Phantom t -> choice
+               [ try (symbol "-|") >> semi >> pure (Terminus t)
+               , eqDef [lhs]
+               , inDef t
+               ]
+    ]
   where party = braces (sepBy context' semi)
         party' = party <|> ((:[]) <$> context)
         eqDef lhs = symbol "=" >> party' >>= go lhs
@@ -151,8 +160,11 @@ def = choice [ symbol "|-" >> Terminus <$> manyTill term semi
         fudge [t] = t
         fudge ts = Compound ts
         go lhs rhs = choice [ semi >> pure (Rule lhs rhs [] [])
-                            , colon >> uncurry (Rule lhs rhs) <$> subRules ]
+                            , colon >> uncurry (Rule lhs rhs) <$> subRules col ]
         bt = symbol "`"
 
-subRules :: Stream s m Char => ParsecT s u m ([Context],[Definition])
-subRules = undefined
+subRules :: Stream s m Char => Int -> ParsecT s u m ([Context],[Definition])
+subRules col = partitionEithers <$> many (offside col >> subRule)
+
+subRule :: Stream s m Char => ParsecT s u m (Either Context Definition)
+subRule = undefined
