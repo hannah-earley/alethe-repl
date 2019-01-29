@@ -1,11 +1,24 @@
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE NoMonomorphismRestriction #-}
-module Kappa where
+
+module Language
+( Term(..)
+, Definition(..)
+, Declaration(..)
+, Context(..)
+, Statement(..)
+, Program(..)
+, prog
+, atomZero
+, atomSucc
+, atomNil
+, atomCons
+, atomPlus
+, atomMinus
+) where
 
 import Text.Parsec
-import qualified Text.Parsec.Char as C
 import qualified Text.Parsec.Token as T
--- import Text.Parsec.Combinator
 import Data.Char
 import Data.Either (partitionEithers)
 
@@ -31,42 +44,19 @@ kappaStyle = T.LanguageDef
 identifier = T.identifier lexer
 reserved = T.reserved lexer
 operator = T.operator lexer
-reservedOp = T.reservedOp lexer
-charLiteral = T.charLiteral lexer
 stringLiteral = T.stringLiteral lexer
 natural = T.natural lexer
--- integer = T.integer lexer
--- float = T.float lexer
--- naturalOrFloat = T.naturalOrFloat lexer
--- decimal = T.decimal lexer
--- hexadecimal = T.hexadecimal lexer
--- octal = T.octal lexer
 symbol = T.symbol lexer
-lexeme = T.lexeme lexer
-whiteSpace = T.whiteSpace lexer
 parens = T.parens lexer
 braces = T.braces lexer
--- angles = T.angles lexer
 brackets = T.brackets lexer
--- squares = T.squares lexer
 semi = T.semi lexer
-comma = T.comma lexer
 colon = T.colon lexer
 dot = T.dot lexer
 semiSep = T.semiSep lexer
-semiSep1 = T.semiSep1 lexer
-commaSep = T.commaSep lexer
-commaSep1 = T.commaSep1 lexer
-
-identNotOp = try (do c <- try operator
-                     unexpected ("operator " ++ show c)
-                  <|> return ()
-                 ) >> identifier
-
-
-
 
 data Term = Atom String
+          | Scoped Int String
           | Var String
           | Asymm Term Term
           | Compound [Term]
@@ -88,6 +78,12 @@ data Context = Context Term [Term]
              | Phantom [Term]
              deriving (Show)
 
+data Statement = Import String
+               | Definition Definition
+               deriving (Show)
+
+newtype Program = Program [Statement]
+
 termTerm = Compound []
 atomZero = Atom "Z"
 atomSucc = Atom "S"
@@ -96,13 +92,21 @@ atomCons = Atom "Cons"
 atomPlus = Atom "Plus"
 atomMinus = Atom "Minus"
 asymmDollar = Asymm atomPlus atomMinus
+atomChar c = Atom [c]
 nat n = if n <= 0 then atomZero else Compound [ atomSucc, nat (n-1) ]
 cons car cdr = Compound [atomCons, car, cdr]
-atomChar c = Atom [c]
+
+identNotOp :: Stream s m Char => ParsecT s u m String
+identNotOp = try (do c <- try operator
+                     unexpected ("operator " ++ show c)
+                  <|> return ()
+                 ) >> identifier
 
 term :: Stream s m Char => ParsecT s u m Term
 term = choice [ symbol "$" >> pure asymmDollar
               , char '#' >> Atom <$> (stringLiteral <|> identifier)
+              , many1 (char '@') >>= \ats ->
+                    Scoped (length ats) <$> (stringLiteral <|> identifier)
               , natural >>= pure . nat
               , stringLiteral >>= pure . goStr
               , brackets (option atomNil goCar) <?> "list"
@@ -131,8 +135,10 @@ context = option (Phantom []) $ do
 context' :: Stream s m Char => ParsecT s u m Context
 context' = do { c <- term; symbol "|"; Context c <$> many term }
 
-
+getCol :: Monad m => ParsecT s u m Column
 getCol = sourceColumn . statePos <$> getParserState
+
+offside :: Monad m => Column -> ParsecT s u m ()
 offside col = do col' <- getCol
                  if col' > col
                     then return ()
@@ -148,10 +154,7 @@ decl' col = choice
     , party >>= goMulti
     ]
   where
-    party = braces (sepBy context' semi) <|> ((:[]) <$> context)
-    single [t] = pure t
-    single _   = unexpected "group party"
-
+    party = braces (semiSep context') <|> ((:[]) <$> context)
     infOp = between bt bt (fudge <$> many term) <|> (Atom <$> operator)
     bt = symbol "`"
     fudge [t] = t
@@ -171,3 +174,10 @@ decl' col = choice
     goDef lhs rhs = choice [ semi >> (pure . Right $ Rule lhs rhs [] [])
                            , colon >> Right . uncurry (Rule lhs rhs) <$> goDecl ]
     goDecl = partitionEithers <$> many (offside col >> decl)
+
+def :: Stream s m Char => ParsecT s u m Definition
+def = decl >>= either (const $ unexpected "declaration") return
+
+prog :: Stream s m Char => ParsecT s u m [Statement]
+prog = manyTill (choice [ reserved "import" >> Import <$> stringLiteral 
+                        , Definition <$> def ]) eof
