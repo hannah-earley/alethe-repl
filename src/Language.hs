@@ -53,6 +53,16 @@ hoists f gs x = f $ map ($x) gs
 ($>) = flip (<$)
 infixr 4 $>
 
+-- parsing tools
+
+getCol :: Monad m => ParsecT s u m Column
+getCol = sourceColumn . statePos <$> getParserState
+
+offside :: Monad m => Column -> ParsecT s u m ()
+offside col = getCol >>= \col' -> if col' > col
+                    then return ()
+                    else parserFail "indentation error"
+
 -- lexing and tokens
 
 lexer = T.makeTokenParser kappaStyle
@@ -136,10 +146,13 @@ atomCons = Atom "Cons"
 atomPlus = Atom "Plus"
 atomMinus = Atom "Minus"
 atomChar c = Atom [c]
+
 nats = iterate (\n -> Compound [atomSucc, n]) atomZero
+nat = (nats!!) . fromIntegral
 cons car cdr = Compound [atomCons, car, cdr]
 sexpr = flip $ foldr cons
 slist = foldr cons atomNil
+str = slist . map atomChar
 
 -- parsing
 
@@ -148,34 +161,22 @@ term = termSugar <|> tid <|> tcomp
   where
     tid = resolve <$> ident <??> ["atom", "variable"]
     resolve id@(x:_) = if' (isLower x) Var Atom id
-    tcomp = try tasymm <|> Compound <$> many term <?> "compound term"
-    tasymm = liftM2 Asymm term (symbol "!" >> term)
+    tcomp = (<?> "compound term") . option term0 $
+        term >>= hoist (<|>) tasymm tcomp'
+    tasymm t = symbol "!" >> Asymm t <$> term
+    tcomp' t = Compound . (t:) <$>  many term
 
 termSugar :: Stream s m Char => ParsecT s u m Term
 termSugar = tdoll <|> tatom' <|> tscope <|> tnat <|> tstr <|> tlist
   where
     tdoll = symbol "$" $> Asymm atomPlus atomMinus
-
     tatom'= char '#' >> Atom <$> (stringLiteral <|> identifier)
-
-    tscope= liftM2 Scoped (length <$> many1 (char '@'))
-                           (stringLiteral <|> identifier)
-
-    tnat  = (nats!!) . fromInteger <$> natural
-
-    tstr  = slist . map atomChar <$> stringLiteral
-
-    tlist = brackets (option atomNil tlist1) <?> "list"
-    tlist1= liftM2 sexpr (many1 term) (option atomNil $ symbol "." >> term)
-
-getCol :: Monad m => ParsecT s u m Column
-getCol = sourceColumn . statePos <$> getParserState
-
-offside :: Monad m => Column -> ParsecT s u m ()
-offside col = do col' <- getCol
-                 if col' > col
-                    then return ()
-                    else parserFail "indentation error"
+    tscope= char '@' >> liftM2 Scoped (length <$> many (char '@'))
+                                      (stringLiteral <|> identifier)
+    tnat  = nat <$> natural
+    tstr  = str <$> stringLiteral
+    tlist = (<?> "list") . brackets $ liftM2 sexpr (many1 term)
+                                      (option atomNil $ symbol "." >> term)
 
 decl :: Stream s m Char => ParsecT s u m (Either Declaration Definition)
 decl = getCol >>= decl'
@@ -185,7 +186,7 @@ decl' col = dterm <|> dsing <|> dmult
 
     dsing = context' >>= \case
                 Context c lhs -> hoist2 (<|>) rule1 dmult1 c lhs
-                Phantom lhs   -> hoist  (<|>) dsop  dsrel    lhs
+                Phantom   lhs -> hoist  (<|>) dsop  dsrel    lhs
 
     dsrel  lhs        = symbol "=" >> many term >>= dsrel' lhs
     dsrel' lhs rhs    = rule2 lhs rhs <|> def [Phantom lhs] [Phantom rhs]
@@ -216,6 +217,6 @@ prog :: Stream s m Char => ParsecT s u m [Statement]
 prog = manyTill (pimp <|> pdef) eof
   where
     pimp = reserved "import" >> Import <$> stringLiteral
-    pdef = decl >>= \d -> case d of
-                Left _ -> unexpected "declaration"
+    pdef = decl >>= \case
+                Left  _ -> unexpected "declaration"
                 Right e -> return $ Definition e
