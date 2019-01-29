@@ -91,40 +91,48 @@ atomNil = Atom "Nil"
 atomCons = Atom "Cons"
 atomPlus = Atom "Plus"
 atomMinus = Atom "Minus"
-asymmDollar = Asymm atomPlus atomMinus
 atomChar c = Atom [c]
-nat n = if n <= 0 then atomZero else Compound [ atomSucc, nat (n-1) ]
+nats = iterate (\n -> Compound [atomSucc, n]) atomZero
 cons car cdr = Compound [atomCons, car, cdr]
 
-identNotOp :: Stream s m Char => ParsecT s u m String
-identNotOp = try (do c <- try operator
-                     unexpected ("operator " ++ show c)
-                  <|> return ()
-                 ) >> identifier
-
 term :: Stream s m Char => ParsecT s u m Term
-term = choice [ symbol "$" >> pure asymmDollar
-              , char '#' >> Atom <$> (stringLiteral <|> identifier)
-              , many1 (char '@') >>= \ats ->
-                    Scoped (length ats) <$> (stringLiteral <|> identifier)
-              , natural >>= pure . nat
-              , stringLiteral >>= pure . goStr
-              , brackets (option atomNil goCar) <?> "list"
-              -- ^sugar
-              , identNotOp >>= pure . goId <?> "identifier"
-              , parens goComp <?> "compound term"
-              ]
+term = termSugar <|> tid <|> tcomp
   where
-    goStr [] = atomNil
-    goStr (c:cs) = cons (atomChar c) (goStr cs)
-    goList = goCar <|> goCdr
-    goCar = do { car <- term; cdr <- goList;
-                 return $ cons car cdr }
-    goCdr = option atomNil $ symbol "." >> term
-    goId name@(x:_) = if isLower x then Var name else Atom name
-    goComp = option (Compound []) $ term >>= goComp'
-    goComp' x = choice [ symbol "!" >> Asymm x <$> term
-                        , Compound . (x:) <$> many term ]
+    tid   = do id@(x:_) <- notop >> identifier
+               return $ if isLower x then Var id else Atom id
+            <?> "identifier"
+
+    notop = try . option () $ do
+                c <- try operator
+                unexpected ("operator " ++ show c)
+
+    tcomp = parens (option (Compound []) tcomp1) <?> "compound term"
+
+    tcomp1= term >>= \t -> tasymm t <|> tcomp' t
+
+    tasymm t = symbol "!" >> Asymm t <$> term
+
+    tcomp' t = Compound . (t:) <$> many term
+
+termSugar :: Stream s m Char => ParsecT s u m Term
+termSugar = tdoll <|> tatom' <|> tscope <|> tnat <|> tstr <|> tlist
+  where
+    tdoll = symbol "$" >> return (Asymm atomPlus atomMinus)
+
+    tatom'= char '#' >> Atom <$> (stringLiteral <|> identifier)
+
+    tscope= do lvl <- length <$> many1 (char '@')
+               Scoped lvl <$> (stringLiteral <|> identifier)
+
+    tnat  = (nats!!) . fromInteger <$> natural
+
+    tstr  = foldr (cons . atomChar) atomNil <$> stringLiteral
+
+    tlist = brackets (option atomNil tlist1) <?> "list"
+
+    tlist1= do cars <- many1 term
+               cdr <- option atomNil $ symbol "." >> term
+               return $ foldr cons cdr cars
 
 context :: Stream s m Char => ParsecT s u m Context
 context = option (Phantom []) $ do
