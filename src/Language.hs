@@ -101,13 +101,11 @@ term = termSugar <|> tid <|> tcomp
     tid   = do id@(x:_) <- notop >> identifier
                return $ if isLower x then Var id else Atom id
             <?> "identifier"
-
     notop = try . option () $ do
                 c <- try operator
                 unexpected ("operator " ++ show c)
 
     tcomp = parens (option (Compound []) tcomp1) <?> "compound term"
-
     tcomp1= term >>= \t -> tasymm t <|> tcomp' t
 
     tasymm t = symbol "!" >> Asymm t <$> term
@@ -129,7 +127,6 @@ termSugar = tdoll <|> tatom' <|> tscope <|> tnat <|> tstr <|> tlist
     tstr  = foldr (cons . atomChar) atomNil <$> stringLiteral
 
     tlist = brackets (option atomNil tlist1) <?> "list"
-
     tlist1= do cars <- many1 term
                cdr <- option atomNil $ symbol "." >> term
                return $ foldr cons cdr cars
@@ -154,38 +151,43 @@ offside col = do col' <- getCol
 
 decl :: Stream s m Char => ParsecT s u m (Either Declaration Definition)
 decl = getCol >>= decl'
-
-decl' :: Stream s m Char => Column -> ParsecT s u m (Either Declaration Definition)
-decl' col = choice
-    [ symbol "|-" >> Right . Terminus <$> manyTill term semi
-    , context >>= goSingle
-    , party >>= goMulti
-    ]
+decl' col = dterm <|> dsing <|> dmult
   where
+    dterm = symbol "|-" >> Right . Terminus <$> manyTill term semi
+
+    dsing = context >>= \x -> case x of
+                Context c lhs -> dsdot c lhs <|> dmult' [x]
+                Phantom lhs -> dsinf lhs <|> dseq lhs
+
+    dsdot c lhs = dot >> return (Left $ DeclContext c lhs)
+    dseq lhs = symbol "=" >> many term >>= dseq' lhs
+    dsinf lhs = do let bt = symbol "`"
+                   op <- between bt bt (fudge <$> many term)
+                            <|> (Atom <$> operator)
+                   rhs <- many term
+                   dsinf' lhs op rhs
+
+    dmult = party >>= dmult'
     party = braces (semiSep context') <|> ((:[]) <$> context)
-    infOp = between bt bt (fudge <$> many term) <|> (Atom <$> operator)
-    bt = symbol "`"
+    dmult' lhs = symbol "=" >> party >>= ddef lhs
+
+    dsinf' lhs op rhs = dseq' (sandwich op lhs termTerm) (sandwich termTerm rhs op)
+      where sandwich l m r = [l] ++ m ++ [r]
+    dseq' lhs rhs = dsed lhs rhs <|> ddef [Phantom lhs] [Phantom rhs]
+    dsed lhs rhs = dot >> return (Left $ DeclRule lhs rhs)
+
+    ddef lhs rhs = let top = Right . uncurry (Rule lhs rhs)
+                   in ddef0 top <|> ddef1 top
+    ddef0 top = semi >> return (top ([],[]))
+    ddef1 top = colon >> top . partitionEithers <$> many (offside col >> decl)
+
     fudge [t] = t
     fudge ts = Compound ts
 
-    goSingle (Context c lhs) = choice
-        [ dot >> (pure . Left $ DeclContext c lhs)
-        , goMulti [Context c lhs] ]
-    goSingle (Phantom lhs) = choice
-        [ do { op <- infOp; rhs <- many term; goIn lhs op rhs }
-        , symbol "=" >> many term >>= goEq lhs ]
-    goMulti lhs = symbol "=" >> party >>= goDef lhs
-
-    goEq lhs rhs = choice [ dot >> (pure . Left $ DeclRule lhs rhs)
-                          , goDef [Phantom lhs] [Phantom rhs] ]
-    goIn lhs op rhs = goEq ([op] ++ lhs ++ [termTerm]) ([termTerm] ++ rhs ++ [op])
-    goDef lhs rhs = choice [ semi >> (pure . Right $ Rule lhs rhs [] [])
-                           , colon >> Right . uncurry (Rule lhs rhs) <$> goDecl ]
-    goDecl = partitionEithers <$> many (offside col >> decl)
-
-def :: Stream s m Char => ParsecT s u m Definition
-def = decl >>= either (const $ unexpected "declaration") return
-
 prog :: Stream s m Char => ParsecT s u m [Statement]
-prog = manyTill (choice [ reserved "import" >> Import <$> stringLiteral 
-                        , Definition <$> def ]) eof
+prog = manyTill (pimp <|> pdef) eof
+  where
+    pimp = reserved "import" >> Import <$> stringLiteral
+    pdef = decl >>= \d -> case d of
+                Left _ -> unexpected "declaration"
+                Right e -> return $ Definition e
