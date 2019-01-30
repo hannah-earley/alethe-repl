@@ -75,14 +75,14 @@ kappaStyle = T.LanguageDef
                , T.identLetter = satisfy $ not . reservedIdLetter
                , T.reservedNames = [ "import" ]
                , T.caseSensitive = True
-               , T.opStart = satisfy $ not . rservedOpStart
+               , T.opStart = satisfy $ not . reservedOpStart
                , T.opLetter = T.identLetter kappaStyle
                , T.reservedOpNames = [ ":", ";", ".", "!" ] }
   where
     nonVisible c = isControl c || isSpace c || isSeparator c
-    reservedIdLetter c = nonVisible c || c `elem` ".:;`#|!$@<>()[]{}\""
+    reservedIdLetter c = nonVisible c || c `elem` ".:;`#|!$~<>()[]{}\""
     reservedIdStart c = reservedIdLetter c || isDigit c
-    rservedOpStart c = reservedIdStart c || isLetter c || c `elem` "'"
+    reservedOpStart c = reservedIdStart c || isLetter c || c `elem` "'"
 
 identifier = T.identifier lexer
 reserved = T.reserved lexer
@@ -90,6 +90,7 @@ operator = T.operator lexer
 stringLiteral = T.stringLiteral lexer
 natural = T.natural lexer
 symbol = T.symbol lexer
+lexeme = T.lexeme lexer
 parens = T.parens lexer
 braces = T.braces lexer
 brackets = T.brackets lexer
@@ -97,12 +98,6 @@ semi = T.semi lexer
 colon = T.colon lexer
 dot = T.dot lexer
 semiSep = T.semiSep lexer
-
--- token edge cases
-
-grave = symbol "`"
-notop = try . option () $ operator >>= unexpected . ("operator " ++) . show
-ident = notop >> identifier <?> "identifier"
 
 -- types and adts
 
@@ -156,23 +151,41 @@ str = slist . map atomChar
 
 -- parsing
 
-term :: Stream s m Char => ParsecT s u m Term
-term = termSugar <|> tid <|> tcomp
+idRaw = lexeme $ many (T.identLetter kappaStyle)
+idQual = stringLiteral <|> idRaw
+opScoped = char '~' >> liftM2 Scoped (length <$> many (char '~')) idQual
+
+op :: Stream s m Char => ParsecT s u m Term
+op = opScoped <|> opComp <|> opNorm <?> "operator"
   where
-    tid = resolve <$> ident <??> ["atom", "variable"]
+    opSub = opScoped <|> opNorm <?> "operator"
+    opComp = between grave grave (fudge <$> many (opSub <|> term))
+    opNorm = Atom <$> operator
+
+    grave = symbol "`"
+    fudge [t] = t
+    fudge ts  = Compound ts
+
+ident :: Stream s m Char => ParsecT s u m Term
+ident = idHash <|> idFree <??> ["atom", "variable"]
+  where
+    idHash = char '#' >> (opScoped <|> Atom <$> idQual)
+    idFree = notop >> resolve <$> identifier
     resolve id@(x:_) = if' (isLower x) Var Atom id
-    tcomp = (<?> "compound term") . option term0 $
+    notop = try . option () $ operator >>= unexpected . ("operator " ++) . show
+
+term :: Stream s m Char => ParsecT s u m Term
+term = termSugar <|> ident <|> tcomp
+  where
+    tcomp = (<?> "compound term") . parens . option term0 $
         term >>= hoist (<|>) tasymm tcomp'
     tasymm t = symbol "!" >> Asymm t <$> term
     tcomp' t = Compound . (t:) <$>  many term
 
 termSugar :: Stream s m Char => ParsecT s u m Term
-termSugar = tdoll <|> tatom' <|> tscope <|> tnat <|> tstr <|> tlist
+termSugar = tdoll <|> tnat <|> tstr <|> tlist
   where
     tdoll = symbol "$" $> Asymm atomPlus atomMinus
-    tatom'= char '#' >> Atom <$> (stringLiteral <|> identifier)
-    tscope= char '@' >> liftM2 Scoped (length <$> many (char '@'))
-                                      (stringLiteral <|> identifier)
     tnat  = nat <$> natural
     tstr  = str <$> stringLiteral
     tlist = (<?> "list") . brackets $ liftM2 sexpr (many1 term)
@@ -190,7 +203,7 @@ decl' col = dterm <|> dsing <|> dmult
 
     dsrel  lhs        = symbol "=" >> many term >>= dsrel' lhs
     dsrel' lhs rhs    = rule2 lhs rhs <|> def [Phantom lhs] [Phantom rhs]
-    dsop   lhs        = bind2 oper (many term) $ dsop' lhs
+    dsop   lhs        = bind2 op (many term) $ dsop' lhs
     dsop'  lhs op rhs = dsrel' (sandwich op lhs termTerm) (sandwich termTerm rhs op)
 
     dmult        = party >>= dmult'
@@ -207,10 +220,6 @@ decl' col = dterm <|> dsing <|> dmult
     party    = braces (semiSep context) <|> ((:[]) <$> context')
     context  = liftM2 Context (term <* symbol "|") (many term)
     context' = try context <|> Phantom <$> many term
-    oper     = between grave grave (fudge <$> many term) <|> (Atom <$> operator)
-
-    fudge [t] = t
-    fudge ts  = Compound ts
     sandwich l m r = [l] ++ m ++ [r]
 
 prog :: Stream s m Char => ParsecT s u m [Statement]
