@@ -1,7 +1,3 @@
-{-# LANGUAGE FlexibleContexts #-}
-{-# LANGUAGE NoMonomorphismRestriction #-}
-{-# LANGUAGE LambdaCase #-}
-
 module Parser ( loadPrograms ) where
 
 import Text.Parsec
@@ -17,7 +13,7 @@ import Control.Arrow ((***))
 import Control.Monad.Trans (liftIO)
 import Control.Exception (bracket)
 import Data.Set (Set)
-import qualified Data.Set as Set
+import qualified Data.Set as S
 
 import System.Posix.Files as F
 import System.Posix.Types (DeviceID, FileID, Fd)
@@ -93,7 +89,7 @@ data ResourceID = ResourceID DeviceID FileID
     deriving (Eq,Ord)
 
 emptyState :: ParseState
-emptyState = ParseState 1 [] phantoms Set.empty ""
+emptyState = ParseState 1 [] phantoms S.empty ""
 
 liftState :: Monad m => ParsecT s u m a -> ParsecT s u m (a,u)
 liftState p = liftM2 (,) p getState
@@ -247,12 +243,12 @@ subParse path = getState >>= join . liftIO . attempt . withResource path . fetch
     attempt m = catchIOError m (return . die . ioMsg path)
 
     fetch st rid handle
-      | Set.member rid seen = return $ return []
+      | S.member rid seen = return $ return []
       | otherwise           = hGetContents handle >>= (restore rel <$>) . sub
       where
         seen = seenFiles st
         rel  = relPath st
-        st'  = st { seenFiles = Set.insert rid seen
+        st'  = st { seenFiles = S.insert rid seen
                   , relPath = rel <//> dir }
         sub  = cwd . runParserT (liftState prog) st' (rel <//> path)
 
@@ -278,8 +274,10 @@ ioMsg path e state = "[" ++ realPath ++ "] System error: " ++ explain e
 parsePrograms :: [FilePath] -> Parser [Definition]
 parsePrograms = fmap concat . mapM subParse
 
-loadPrograms :: [FilePath] -> IO (Either ParseError [Definition])
-loadPrograms paths = runParserT (parsePrograms paths) emptyState "" ""
+loadPrograms :: [FilePath] -> IO (Either KappaError [Definition])
+loadPrograms paths = liftErr <$> runParserT (parsePrograms paths) emptyState "" ""
+  where liftErr (Left e) = Left $ ParseError e
+        liftErr (Right v)= Right v
 
 test :: String -> IO (Either ParseError [Definition])
 test = runParserT prog emptyState "<local>"
