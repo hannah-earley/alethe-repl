@@ -17,9 +17,11 @@ extra-source-files:  CHANGELOG.md
 
 executable Kappa
   main-is:             Main.hs
-  other-modules:       Parser, Language
+  other-modules:       Parser, Language, Compiler
+  extensions:          NoMonomorphismRestriction, FlexibleContexts,
+                       TupleSections, LambdaCase
   -- other-extensions:
   build-depends:       base ^>=4.11.1.0, parsec, mtl, containers, unix,
-                       directory, filepath
+                       directory, filepath, array, vector
   hs-source-dirs:      src
   default-language:    Haskell2010
