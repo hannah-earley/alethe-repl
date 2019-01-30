@@ -7,15 +7,13 @@ module Parser
 , Definition(..)
 , Declaration(..)
 , Context(..)
-, Statement(..)
-, Program(..)
-, prog
 , atomZero
 , atomSucc
 , atomNil
 , atomCons
 , atomPlus
 , atomMinus
+, loadPrograms
 ) where
 
 import Text.Parsec
@@ -96,7 +94,7 @@ kappaStyle = T.LanguageDef
                , T.reservedOpNames = [ ":", ";", ".", "!" ] }
   where
     nonVisible c = isControl c || isSpace c || isSeparator c
-    reservedIdLetter c = nonVisible c || c `elem` ".:;`#|!$~<>()[]{}\""
+    reservedIdLetter c = nonVisible c || c `elem` ".:;`#|!$=~<>()[]{}\""
     reservedIdStart c = reservedIdLetter c || isDigit c
     reservedOpStart c = reservedIdStart c || isLetter c || c `elem` "'"
 
@@ -117,8 +115,7 @@ semiSep = T.semiSep lexer
 
 -- types and adts
 
-data Term = Atom String
-          | Scoped Int String
+data Term = Atom Integer String
           | Var String
           | Asymm Term Term
           | Compound [Term]
@@ -140,23 +137,32 @@ data Context = Context Term [Term]
              | Phantom [Term]
              deriving (Show)
 
-data Statement = Import String
-               | Definition Definition
-               deriving (Show)
+-- internal types
 
-newtype Program = Program [Statement]
+type Parser a = ParsecT String ParseState IO a
+
+data ParseState = ParseState
+  { scopeCounter :: Integer
+  , scopeStack :: [Integer]
+  , seenFiles :: Set ResourceID
+  , relPath :: FilePath }
+
+data ResourceID = ResourceID DeviceID FileID
+    deriving (Eq,Ord)
 
 -- common atoms and sugar
 
 term0 = Compound []
 termTerm = Compound []
-atomZero = Atom "Z"
-atomSucc = Atom "S"
-atomNil = Atom "Nil"
-atomCons = Atom "Cons"
-atomPlus = Atom "Plus"
-atomMinus = Atom "Minus"
-atomChar c = Atom [c]
+atom = Atom 0
+virt = Atom (-1) ""
+atomZero = atom "Z"
+atomSucc = atom "S"
+atomNil = atom "Nil"
+atomCons = atom "Cons"
+atomPlus = atom "Plus"
+atomMinus = atom "Minus"
+atomChar c = atom [c]
 
 nats = iterate (\n -> Compound [atomSucc, n]) atomZero
 nat = (nats!!) . fromIntegral
@@ -165,32 +171,58 @@ sexpr = flip $ foldr cons
 slist = foldr cons atomNil
 str = slist . map atomChar
 
+-- scoping
+
+scopeId :: Integral a => a -> Parser Integer
+scopeId lvl = scopeStack <$> getState >>= go (lvl - 1)
+  where go n (l:ls) | n > 0     = go (n-1) ls
+                    | n == 0    = return l
+        go _ _ = unexpected "inaccessible scope"
+
+scopePop :: Parser Integer
+scopePop = do st <- getState
+              let (x:xs) = scopeStack st
+              putState $ st {scopeStack = xs}
+              return x
+
+scopePush :: Parser Integer
+scopePush = do st <- getState
+               let x = scopeCounter st
+                   xs = scopeStack st
+               putState $ st { scopeCounter = x+1
+                             , scopeStack = x:xs}
+               return x
+
+withScope :: Parser x -> Parser x
+withScope a = scopePush >> liftM2 const a scopePop
+
 -- parsing
 
 idRaw = lexeme $ many (T.identLetter kappaStyle)
 idQual = stringLiteral <|> idRaw
-opScoped = char '~' >> liftM2 Scoped (length <$> many (char '~')) idQual
+opScoped = liftM2 Atom sid idQual
+  where sid = try $ length <$> many1 (char '~') >>= scopeId
 
-op :: Stream s m Char => ParsecT s u m Term
+op :: Parser Term
 op = opScoped <|> opComp <|> opNorm <?> "operator"
   where
     opSub = opScoped <|> opNorm <?> "operator"
     opComp = between grave grave (fudge <$> many (opSub <|> term))
-    opNorm = Atom <$> operator
+    opNorm = atom <$> operator
 
     grave = symbol "`"
     fudge [t] = t
     fudge ts  = Compound ts
 
-ident :: Stream s m Char => ParsecT s u m Term
+ident :: Parser Term
 ident = idHash <|> idFree <??> ["atom", "variable"]
   where
-    idHash = char '#' >> (opScoped <|> Atom <$> idQual)
+    idHash = char '#' >> (opScoped <|> atom <$> idQual)
     idFree = notop >> resolve <$> identifier
-    resolve id@(x:_) = if' (isLower x) Var Atom id
+    resolve id@(x:_) = if' (isLower x) Var atom id
     notop = try . option () $ operator >>= unexpected . ("operator " ++) . show
 
-term :: Stream s m Char => ParsecT s u m Term
+term :: Parser Term
 term = termSugar <|> ident <|> tcomp
   where
     tcomp = (<?> "compound term") . parens . option term0 $
@@ -198,7 +230,7 @@ term = termSugar <|> ident <|> tcomp
     tasymm t = symbol "!" >> Asymm t <$> term
     tcomp' t = Compound . (t:) <$>  many term
 
-termSugar :: Stream s m Char => ParsecT s u m Term
+termSugar :: Parser Term
 termSugar = tdoll <|> tnat <|> tstr <|> tlist
   where
     tdoll = symbol "$" $> Asymm atomPlus atomMinus
@@ -207,8 +239,8 @@ termSugar = tdoll <|> tnat <|> tstr <|> tlist
     tlist = (<?> "list") . brackets $ liftM2 sexpr (many1 term)
                                       (option atomNil $ symbol "." >> term)
 
-decl :: Stream s m Char => ParsecT s u m (Either Declaration Definition)
-decl = getCol >>= decl'
+decl :: Parser (Either Declaration Definition)
+decl = getCol >>= withScope . decl'
 decl' col = dterm <|> dsing <|> dmult
   where
     dterm = symbol "|-" >> Right . Terminus <$> manyTill term semi
@@ -238,27 +270,21 @@ decl' col = dterm <|> dsing <|> dmult
     context' = try context <|> Phantom <$> many term
     sandwich l m r = [l] ++ m ++ [r]
 
-prog :: Stream s IO Char => ParsecT s ParseState IO [Statement]
+prog :: Parser [Definition]
 prog = concat <$> manyTill (pimp <|> pdef) eof
   where
     pimp = reserved "import" >> stringLiteral >>= subParse
     pdef = decl >>= \case
                 Left  _ -> unexpected "declaration"
-                Right e -> return $ [Definition e]
+                Right e -> return $ [e]
+
+test :: String -> IO (Either ParseError [Definition])
+test = runParserT prog emptyState "<local>"
 
 -- file level parsing
 
-data ResourceID = ResourceID DeviceID FileID deriving (Eq, Ord, Show)
-
 resID :: Fd -> IO ResourceID
 resID = (liftM2 ResourceID F.deviceID F.fileID <$>) . F.getFdStatus
-
-data ParseState = ParseState
-  { scopeCounter :: Integer
-  , scopeStack :: [Integer]
-  , seenFiles :: Set ResourceID
-  , relPath :: FilePath
-  } deriving (Show)
 
 emptyState :: ParseState
 emptyState = ParseState 1 [] Set.empty ""
@@ -266,7 +292,7 @@ emptyState = ParseState 1 [] Set.empty ""
 liftState :: Stream s m t => ParsecT s u m a -> ParsecT s u m (a,u)
 liftState p = liftM2 (,) p getState
 
-subParse :: FilePath -> ParsecT s ParseState IO [Statement]
+subParse :: FilePath -> Parser [Definition]
 subParse path = getState >>= join . liftIO . attempt . withResource path . fetch
   where
     dir = takeDirectory path
@@ -281,7 +307,6 @@ subParse path = getState >>= join . liftIO . attempt . withResource path . fetch
         explain e | isDoesNotExistError e = "File does not exist."
                   | isPermissionError e   = "File not accessible."
                   | otherwise             = show e
-
 
     withResource path m = do
         fd  <- openFd path ReadOnly Nothing defaultFileFlags
@@ -309,8 +334,8 @@ die :: Monad m => (u -> String) -> ParsecT s u m a
 die f = do msg <- E.Message . f <$> getState
            getPosition >>= bubble . E.newErrorMessage msg
 
-parsePrograms :: [FilePath] -> ParsecT s ParseState IO [Statement]
+parsePrograms :: [FilePath] -> Parser [Definition]
 parsePrograms = fmap concat . mapM subParse
 
-loadPrograms :: [FilePath] -> IO (Either ParseError [Statement])
+loadPrograms :: [FilePath] -> IO (Either ParseError [Definition])
 loadPrograms paths = runParserT (parsePrograms paths) emptyState "" ""
