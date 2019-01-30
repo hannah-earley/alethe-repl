@@ -19,7 +19,7 @@ module Parser
 ) where
 
 import Text.Parsec
-import Text.Parsec.Prim (mkPT)
+import qualified Text.Parsec.Error as E
 import qualified Text.Parsec.Token as T
 import Data.Char
 import Data.Either (partitionEithers)
@@ -27,15 +27,17 @@ import Data.Either (partitionEithers)
 import Control.Applicative ((<*), (<$))
 import Control.Monad (liftM2)
 import Control.Monad.State.Lazy
+import Control.Exception (bracket)
 import Data.Set (Set)
 import qualified Data.Set as Set
 
 import System.Posix.Files as F
 import System.Posix.Types (DeviceID, FileID, Fd)
 import System.Posix.IO (fdToHandle, openFd, defaultFileFlags, OpenMode(ReadOnly))
-import System.IO (openFile, IOMode(ReadMode), hGetContents, hClose)
+import System.IO (hGetContents, hClose)
+import System.IO.Error (catchIOError, isDoesNotExistError, isPermissionError)
 import System.Directory (withCurrentDirectory)
-import System.FilePath.Posix (takeDirectory)
+import System.FilePath.Posix (takeDirectory, normalise, (</>))
 
 -- combinators etc
 
@@ -62,6 +64,10 @@ hoists f gs x = f $ map ($x) gs
 ($>) :: Functor f => f a -> b -> f b
 ($>) = flip (<$)
 infixr 4 $>
+
+(<//>) :: FilePath -> FilePath -> FilePath
+path1 <//> path2 = normalise $ path1 </> path2
+infixr 5 <//>
 
 -- parsing tools
 
@@ -251,39 +257,57 @@ data ParseState = ParseState
   { scopeCounter :: Integer
   , scopeStack :: [Integer]
   , seenFiles :: Set ResourceID
-  }
+  , relPath :: FilePath
+  } deriving (Show)
 
 emptyState :: ParseState
-emptyState = ParseState 1 [] Set.empty
+emptyState = ParseState 1 [] Set.empty ""
 
 liftState :: Stream s m t => ParsecT s u m a -> ParsecT s u m (a,u)
 liftState p = liftM2 (,) p getState
 
 subParse :: FilePath -> ParsecT s ParseState IO [Statement]
-subParse path = do st <- getState
-                   let seen = seenFiles st
-
-                   fd <- liftIO $ openFd path ReadOnly Nothing defaultFileFlags
-                   rid <- liftIO $ resID fd
-                   handle <- liftIO $ fdToHandle fd
-
-                   if rid `Set.member` seen
-                     then liftIO (hClose handle) >> return []
-                     else do
-                        contents <- liftIO $ hGetContents handle
-                        result <- cwd $ runParserT (liftState prog)
-                                   (st {seenFiles = Set.insert rid seen})
-                                   path contents
-                        liftIO $ hClose handle
-
-                        case result of
-                            Left e -> bubble e
-                            Right (x, st') -> putState st' >> return x
+subParse path = getState >>= join . liftIO . attempt . withResource path . fetch
   where
-    cwd = liftIO . withCurrentDirectory (takeDirectory path)
+    dir = takeDirectory path
+
+    cwd = withCurrentDirectory dir
+
+    attempt m = catchIOError m (return . die . ioMsg)
+
+    ioMsg e state = "[" ++ realPath ++ "] System error: " ++ explain e
+      where
+        realPath = relPath state <//> path
+        explain e | isDoesNotExistError e = "File does not exist."
+                  | isPermissionError e   = "File not accessible."
+                  | otherwise             = show e
+
+
+    withResource path m = do
+        fd  <- openFd path ReadOnly Nothing defaultFileFlags
+        rid <- resID fd
+        bracket (fdToHandle fd) hClose (m rid)
+
+    fetch st rid handle
+      | Set.member rid seen = return $ return []
+      | otherwise           = hGetContents handle >>= (restore rel <$>) . sub
+      where
+        seen = seenFiles st
+        rel  = relPath st
+        st'  = st { seenFiles = Set.insert rid seen
+                  , relPath = rel <//> dir }
+        sub  = cwd . runParserT (liftState prog) st' (rel <//> path)
+
+    restore _   (Left  e)        = bubble e
+    restore rel (Right (x, st')) = putState st'' >> return x
+      where st'' = st' { relPath = rel }
 
 bubble :: Monad m => ParseError -> ParsecT s u m a
-bubble = mkPT . const . return . Empty . return . Error
+bubble = mkPT . const . return . Consumed . return . Error
+
+die :: Monad m => (u -> String) -> ParsecT s u m a
+die f = do msg <- E.Message . f <$> getState
+           getPosition >>= bubble . E.newErrorMessage msg
 
 parsePrograms :: [FilePath] -> ParsecT s ParseState IO [Statement]
 parsePrograms = fmap concat . mapM subParse

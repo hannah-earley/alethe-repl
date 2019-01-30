@@ -19,6 +19,7 @@ executable Kappa
   main-is:             Main.hs
   other-modules:       Parser
   -- other-extensions:
-  build-depends:       base ^>=4.11.1.0, parsec, mtl, containers, unix, directory, filepath
+  build-depends:       base ^>=4.11.1.0, parsec, mtl, containers, unix,
+                       directory, filepath
   hs-source-dirs:      src
   default-language:    Haskell2010
