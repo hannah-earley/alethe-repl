@@ -7,6 +7,7 @@ module Parser
 , Definition(..)
 , Declaration(..)
 , Context(..)
+, phony
 , atomZero
 , atomSucc
 , atomNil
@@ -23,8 +24,8 @@ import Data.Char
 import Data.Either (partitionEithers)
 
 import Control.Applicative ((<*), (<$))
-import Control.Monad (liftM2)
-import Control.Monad.State.Lazy
+import Control.Monad (liftM2,join)
+import Control.Monad.Trans (liftIO)
 import Control.Exception (bracket)
 import Data.Set (Set)
 import qualified Data.Set as Set
@@ -55,9 +56,6 @@ hoist f g h = \x -> g x `f` h x
 
 hoist2 :: (c -> c -> d) -> (a -> b -> c) -> (a -> b -> c) -> a -> b -> d
 hoist2 f g h = \x y -> g x y `f` h x y
-
-hoists :: ([b] -> c) -> [a -> b] -> a -> c
-hoists f gs x = f $ map ($x) gs
 
 ($>) :: Functor f => f a -> b -> f b
 ($>) = flip (<$)
@@ -94,7 +92,7 @@ kappaStyle = T.LanguageDef
                , T.reservedOpNames = [ ":", ";", ".", "!" ] }
   where
     nonVisible c = isControl c || isSpace c || isSeparator c
-    reservedIdLetter c = nonVisible c || c `elem` ".:;`#|!$=~<>()[]{}\""
+    reservedIdLetter c = nonVisible c || c `elem` ".:;`#|!$=~@<>()[]{}\""
     reservedIdStart c = reservedIdLetter c || isDigit c
     reservedOpStart c = reservedIdStart c || isLetter c || c `elem` "'"
 
@@ -124,9 +122,7 @@ data Term = Atom Integer String
 data Definition = Terminus [Term]
                 | Rule { lhs :: [Context]
                        , rhs :: [Context]
-                       , decls :: [Declaration]
-                       , defs :: [Definition] 
-                       }
+                       , decls :: [Declaration] }
                 deriving (Show)
 
 data Declaration = DeclContext Term [Term]
@@ -155,7 +151,7 @@ data ResourceID = ResourceID DeviceID FileID
 term0 = Compound []
 termTerm = Compound []
 atom = Atom 0
-virt = Atom (-1) ""
+phony = Atom (-1) ""
 atomZero = atom "Z"
 atomSucc = atom "S"
 atomNil = atom "Nil"
@@ -174,7 +170,7 @@ str = slist . map atomChar
 -- scoping
 
 scopeId :: Integral a => a -> Parser Integer
-scopeId lvl = scopeStack <$> getState >>= go (lvl - 1)
+scopeId lvl = scopeStack <$> getState >>= go lvl
   where go n (l:ls) | n > 0     = go (n-1) ls
                     | n == 0    = return l
         go _ _ = unexpected "inaccessible scope"
@@ -202,6 +198,8 @@ idRaw = lexeme $ many (T.identLetter kappaStyle)
 idQual = stringLiteral <|> idRaw
 opScoped = liftM2 Atom sid idQual
   where sid = try $ length <$> many1 (char '~') >>= scopeId
+opScoped0= liftM2 Atom sid0 idQual
+  where sid0= try $ char '@' >> scopeId 0
 
 op :: Parser Term
 op = opScoped <|> opComp <|> opNorm <?> "operator"
@@ -215,7 +213,7 @@ op = opScoped <|> opComp <|> opNorm <?> "operator"
     fudge ts  = Compound ts
 
 ident :: Parser Term
-ident = idHash <|> idFree <??> ["atom", "variable"]
+ident = opScoped0 <|> idHash <|> idFree <??> ["atom", "variable"]
   where
     idHash = char '#' >> (opScoped <|> atom <$> idQual)
     idFree = notop >> resolve <$> identifier
@@ -239,11 +237,11 @@ termSugar = tdoll <|> tnat <|> tstr <|> tlist
     tlist = (<?> "list") . brackets $ liftM2 sexpr (many1 term)
                                       (option atomNil $ symbol "." >> term)
 
-decl :: Parser (Either Declaration Definition)
+decl :: Parser (Either Declaration [Definition])
 decl = getCol >>= withScope . decl'
 decl' col = dterm <|> dsing <|> dmult
   where
-    dterm = symbol "|-" >> Right . Terminus <$> manyTill term semi
+    dterm = symbol "|-" >> Right . pure . Terminus <$> manyTill term semi
 
     dsing = context' >>= \case
                 Context c lhs -> hoist2 (<|>) rule1 dmult1 c lhs
@@ -261,22 +259,23 @@ decl' col = dterm <|> dsing <|> dmult
     rule1 c lhs     = dot $> Left (DeclContext c lhs)
     rule2   lhs rhs = dot $> Left (DeclRule lhs rhs)
 
-    def lhs rhs = hoist (<|>) def0 def1 $ Right . uncurry (Rule lhs rhs)
-    def0 top    = semi  $> top ([],[])
-    def1 top    = colon >> top . partitionEithers <$> many (offside col >> decl)
+    def lhs rhs = Right <$> hoist (<|>) def0 def1 (Rule lhs rhs)
+    def0 top    = semi  $> [top []]
+    def1 top    = colon >> uncurry ((:) . top) <$> subDecls col
     
-    party    = braces (semiSep context) <|> ((:[]) <$> context')
+    party    = braces (semiSep context) <|> pure <$> context'
     context  = liftM2 Context (term <* symbol "|") (many term)
     context' = try context <|> Phantom <$> many term
     sandwich l m r = [l] ++ m ++ [r]
+
+subDecls :: Column -> Parser ([Declaration], [Definition])
+subDecls col = fmap join . partitionEithers <$> many (offside col >> decl) 
 
 prog :: Parser [Definition]
 prog = concat <$> manyTill (pimp <|> pdef) eof
   where
     pimp = reserved "import" >> stringLiteral >>= subParse
-    pdef = decl >>= \case
-                Left  _ -> unexpected "declaration"
-                Right e -> return $ [e]
+    pdef = decl >>= either (const $ unexpected "declaration") return
 
 test :: String -> IO (Either ParseError [Definition])
 test = runParserT prog emptyState "<local>"
