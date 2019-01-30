@@ -2,7 +2,7 @@
 {-# LANGUAGE NoMonomorphismRestriction #-}
 {-# LANGUAGE LambdaCase #-}
 
-module Language
+module Parser
 ( Term(..)
 , Definition(..)
 , Declaration(..)
@@ -19,15 +19,25 @@ module Language
 ) where
 
 import Text.Parsec
+import Text.Parsec.Prim (mkPT)
 import qualified Text.Parsec.Token as T
 import Data.Char
 import Data.Either (partitionEithers)
 
--- combinators etc
-
 import Control.Applicative ((<*), (<$))
 import Control.Monad (liftM2)
-import Data.Function (on)
+import Control.Monad.State.Lazy
+import Data.Set (Set)
+import qualified Data.Set as Set
+
+import System.Posix.Files as F
+import System.Posix.Types (DeviceID, FileID, Fd)
+import System.Posix.IO (fdToHandle, openFd, defaultFileFlags, OpenMode(ReadOnly))
+import System.IO (openFile, IOMode(ReadMode), hGetContents, hClose)
+import System.Directory (withCurrentDirectory)
+import System.FilePath.Posix (takeDirectory)
+
+-- combinators etc
 
 bind2 :: Monad m => m a -> m b -> (a -> b -> m c) -> m c
 bind2 mx my f = do { x <- mx; y <- my; f x y }
@@ -222,10 +232,61 @@ decl' col = dterm <|> dsing <|> dmult
     context' = try context <|> Phantom <$> many term
     sandwich l m r = [l] ++ m ++ [r]
 
-prog :: Stream s m Char => ParsecT s u m [Statement]
-prog = manyTill (pimp <|> pdef) eof
+prog :: Stream s IO Char => ParsecT s ParseState IO [Statement]
+prog = concat <$> manyTill (pimp <|> pdef) eof
   where
-    pimp = reserved "import" >> Import <$> stringLiteral
+    pimp = reserved "import" >> stringLiteral >>= subParse
     pdef = decl >>= \case
                 Left  _ -> unexpected "declaration"
-                Right e -> return $ Definition e
+                Right e -> return $ [Definition e]
+
+-- file level parsing
+
+data ResourceID = ResourceID DeviceID FileID deriving (Eq, Ord, Show)
+
+resID :: Fd -> IO ResourceID
+resID = (liftM2 ResourceID F.deviceID F.fileID <$>) . F.getFdStatus
+
+data ParseState = ParseState
+  { scopeCounter :: Integer
+  , scopeStack :: [Integer]
+  , seenFiles :: Set ResourceID
+  }
+
+emptyState :: ParseState
+emptyState = ParseState 1 [] Set.empty
+
+liftState :: Stream s m t => ParsecT s u m a -> ParsecT s u m (a,u)
+liftState p = liftM2 (,) p getState
+
+subParse :: FilePath -> ParsecT s ParseState IO [Statement]
+subParse path = do st <- getState
+                   let seen = seenFiles st
+
+                   fd <- liftIO $ openFd path ReadOnly Nothing defaultFileFlags
+                   rid <- liftIO $ resID fd
+                   handle <- liftIO $ fdToHandle fd
+
+                   if rid `Set.member` seen
+                     then liftIO (hClose handle) >> return []
+                     else do
+                        contents <- liftIO $ hGetContents handle
+                        result <- cwd $ runParserT (liftState prog)
+                                   (st {seenFiles = Set.insert rid seen})
+                                   path contents
+                        liftIO $ hClose handle
+
+                        case result of
+                            Left e -> bubble e
+                            Right (x, st') -> putState st' >> return x
+  where
+    cwd = liftIO . withCurrentDirectory (takeDirectory path)
+
+bubble :: Monad m => ParseError -> ParsecT s u m a
+bubble = mkPT . const . return . Empty . return . Error
+
+parsePrograms :: [FilePath] -> ParsecT s ParseState IO [Statement]
+parsePrograms = fmap concat . mapM subParse
+
+loadPrograms :: [FilePath] -> IO (Either ParseError [Statement])
+loadPrograms paths = runParserT (parsePrograms paths) emptyState "" ""
