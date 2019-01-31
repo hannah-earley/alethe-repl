@@ -27,6 +27,7 @@ data Context = Context Term [Term]
 
 data KappaError = ParseError PE.ParseError
                 | AmbiguityError [Definition]
+                | CompilationError [Definition]
                 -- | IrreversibilityError [Definition]
                 -- ...
                 deriving (Show)

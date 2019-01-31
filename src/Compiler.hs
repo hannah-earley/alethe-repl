@@ -6,7 +6,7 @@ import Miscellanea
 
 import Data.Set (Set)
 import qualified Data.Set as S
-import Data.Map (Map)
+import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as M
 import Data.Vector (Vector,(!))
 import qualified Data.Vector as V
@@ -32,7 +32,7 @@ compFiles :: [FilePath] -> IO (Either KappaError [Strategy])
 compFiles ps = loadPrograms ps >>= return . (compile =<<)
 
 compile :: [Definition] -> Either KappaError [Strategy]
-compile ds = cAmbi ds >> return (concatMap tgSolve ds)
+compile ds = cAmbi ds >> tgSolves ds
 
 compTest ps = do Right defs <- loadPrograms ps
                  return defs
@@ -113,62 +113,19 @@ tgBuild rules = build S.empty . S.fromList
         next = S.unions (map (es2ns . snd) assocs) S.\\ visited
         assocs' = build (visited `S.union` from) next
 
-adjListEdges :: [(v, [(l, w, v)])] -> [(v,l,w,v)]
-adjListEdges = concatMap (\(u,vs) -> map (\(l,w,v) -> (u,l,w,v)) vs)
+tgSolve :: Definition -> Either KappaError [Strategy]
+tgSolve = mapLeft (CompilationError . pure) . tgSolve'
 
-floydWarshall :: (Ord v, Ord w, Num w, Show w, Show v, Show l) => [(v,l,w,v)] -> (v -> v -> (Extended w,[v],[l]))
-floydWarshall [] = \u v -> if u == v then (Finite 0,[u],[]) else error "no route possible"
-floydWarshall edges 
-  -- | trace ("\n\nfloydWarshall:\n" ++ show edges ++ "\n" ++ show vertices ++ "\n" ++ show vertIdMap ++ "\n" ++ show labels ++ "\n\n") False = undefined
-  | otherwise = let arr = fw n in shortestPath arr
-  where
-    vertices = nub $ concatMap (\(l,_,_,r) -> [l,r]) edges
-    vertIdMap = M.fromList $ zip vertices [0..]
-    idVert = let vec = V.fromList vertices in (vec V.!)
-    vertId = (vertIdMap M.!)
-    -- vertId v = trace ("vert id: " ++ show v) (vertIdMap M.! v)
-
-    weights = M.fromList $ map (\(l,_,w,r) -> ((vertId l, vertId r), w)) edges
-    weight = curry $ maybe PosInfinite Finite . (weights M.!?)
-
-    labels = M.fromList $ map (\(l,x,_,r) -> ((vertId l, vertId r), x)) edges
-    label = curry (labels M.!)
-    -- label i j = trace ("label: " ++ show (i,j)) (curry (labels M.!) 0 0)
-
-    n = length vertices - 1
-    mkArr f = Ar.array ((0,0),(n,n)) [((i,j), f i j) | i <- [0..n], j <- [0..n]]
-    fw 0 = mkArr $ \i j -> (weight i j, j)
-    fw k = let prev = fw (k-1) in mkArr $ \i j -> go prev i j k
-
-    go arr i j k
-      | dij' < dij = (dij', nik)
-      | otherwise  = (dij,  nij)
-      where (dij, nij) = arr Ar.! (i,j)
-            (dik, nik) = arr Ar.! (i,k)
-            (dkj, _)   = arr Ar.! (k,j)
-            dij' = dik + dkj
-
-    shortestPath arr u v
-      -- | trace ("sPath: " ++ show (u,v) ++ "\n" ++ show arr) False = undefined
-      | otherwise = (w, map idVert thePath, zipWith label thePath (tail thePath))
-      where thePath = path u'
-            u' = vertId u
-            v' = vertId v
-            path x | trace ("path: " ++ show x ++ ", " ++ show (idVert x)) False = undefined
-                   | x == v'   = [v']
-                   | otherwise = x : path (snd $ arr Ar.! (x,v'))
-            w = fst $ arr Ar.! (u',v')
-
-tgSolve :: Definition -> [Strategy]
-tgSolve (Terminus t) = let (l,r) = asplit t in StratStop <$> nub [l,r]
-tgSolve (Rule l r d) = [Strategy l1 vc pl1 r1, Strategy l2 vc pl2 r2]
+tgSolve' :: Definition -> Either Definition [Strategy]
+tgSolve'   (Terminus t) = let (l,r) = asplit t in Right $ StratStop <$> nub [l,r]
+tgSolve' x@(Rule l r d) = 
+    do pl1 <- maybe (Left x) (Right . snd) mpl
+       let pl2 = reverse $ map flipEither pl1
+       return [Strategy l1 vc pl1 r1, Strategy l2 vc pl2 r2]
   where (nl,l1,r2) = varsplit l
         (nr,l2,r1) = varsplit r
-
         vc = V.fromList . flip map d $ \(Declaration _ c) -> c
-        es = adjListEdges $ tgBuild d [nl,nr]
-        (_,_,pl1) = floydWarshall es nl nr
-        pl2 = reverse $ map flipEither pl1
+        mpl = dijkstra (M.fromList $ tgBuild d [nl,nr]) nl nr
 
-        flipEither (Left x)  = Right x
-        flipEither (Right y) = Left y
+tgSolves :: [Definition] -> Either KappaError [Strategy]
+tgSolves = mapLeft CompilationError . fmap concat . combineEithers . map tgSolve'
