@@ -6,12 +6,10 @@ import Miscellanea
 
 import Data.Set (Set)
 import qualified Data.Set as S
-import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as M
 import Data.Vector (Vector,(!))
 import qualified Data.Vector as V
 import qualified Data.Array.ST as A
-import qualified Data.Array as Ar
 import Control.Monad.ST (runST,ST)
 import Control.Exception (assert)
 import Control.Monad (filterM)
@@ -19,23 +17,11 @@ import qualified Data.Ix as I
 import Data.List (nub)
 import Data.Maybe (catMaybes)
 
-import Debug.Trace (trace)
-
-data Strategy = StratStop [Term]
-              | Strategy { lpatt :: [Context]
-                         , rules :: Vector Context
-                         , plan  :: [Either Int Int]
-                         , rpatt :: [Context] }
-              deriving (Show)
-
-compFiles :: [FilePath] -> IO (Either KappaError [Strategy])
+compFiles :: [FilePath] -> IO (Either KappaError Program)
 compFiles ps = loadPrograms ps >>= return . (compile =<<)
 
-compile :: [Definition] -> Either KappaError [Strategy]
-compile ds = cAmbi ds >> tgSolves ds
-
-compTest ps = do Right defs <- loadPrograms ps
-                 return defs
+compile :: [Definition] -> Either KappaError Program
+compile ds = fmap Program $ cAmbi ds >> tgSolves ds
 
 -- phase 1: ambiguity checks
 -- pug = pattern unifying graph
@@ -51,8 +37,8 @@ cAmbi ds = handle . map resolve $ runST $ pugBuild ctxts >>= pugAmbiguities
 
 getContexts :: [Definition] -> [(Int,Context)]
 getContexts = concat . zipWith f [0..]
-  where f n def@(Rule {}) = map (n,) $ lhs def ++ rhs def
-        f n def@(Terminus t) = [(n,Context (Var "") t)]
+  where f n (Rule lhs rhs _) = map (n,) $ lhs ++ rhs
+        f n (Terminus t)     = [(n,Context (Var "") t)]
 
 pugBuild :: Vector (Int, Context) -> ST s (A.STArray s (Int,Int) Bool)
 pugBuild ctxts =
@@ -93,18 +79,19 @@ pugAmbiguities arr =
 tgBuild :: [Declaration] -> [Set String] -> [(Set String, [(Either Int Int, Int, Set String)])]
 tgBuild rules = build S.empty . S.fromList
   where
-    transitions = concat $ zipWith mkTrans [0..] rules
+    transitions = concat $ zipWith mkTrans ([0..] :: [Int]) rules
     mkTrans n (Declaration w (Context c p))
       = [(Right n,w,cv,pv),(Left n,w,pv,cv)]
       where cv = vars c
             pv = vars p
-    goTrans node (lab,weight,lhs,rhs)
-      | (lhs `S.isSubsetOf` node) && not (rhs `S.isSubsetOf` node)
-                  = Just (lab, weight, (node S.\\ lhs) `S.union` rhs)
+    goTrans node (lab,wei,lvars,rvars)
+      | (lvars `S.isSubsetOf` node) && not (rvars `S.isSubsetOf` node)
+                  = Just (lab, wei, (node S.\\ lvars) `S.union` rvars)
       | otherwise = Nothing
 
     walk node = catMaybes $ map (goTrans node) transitions
     es2ns = S.fromList . map (\(_,_,x) -> x)
+
     build visited from
       | S.null from = []
       | otherwise   = assocs ++ assocs'
@@ -117,7 +104,7 @@ tgSolve :: Definition -> Either KappaError [Strategy]
 tgSolve = mapLeft (CompilationError . pure) . tgSolve'
 
 tgSolve' :: Definition -> Either Definition [Strategy]
-tgSolve'   (Terminus t) = let (l,r) = asplit t in Right $ StratStop <$> nub [l,r]
+tgSolve'   (Terminus t) = let (l,r) = asplit t in Right $ StratHalt <$> nub [l,r]
 tgSolve' x@(Rule l r d) = 
     do pl1 <- maybe (Left x) (Right . snd) mpl
        let pl2 = reverse $ map flipEither pl1

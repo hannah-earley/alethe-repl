@@ -1,4 +1,8 @@
-module Parser ( loadPrograms ) where
+module Parser
+( loadPrograms
+, testParse
+, readInput
+) where
 
 import Text.Parsec
 import qualified Text.Parsec.Error as E
@@ -21,27 +25,10 @@ import System.Posix.IO (fdToHandle, openFd, defaultFileFlags, OpenMode(ReadOnly)
 import System.IO (hGetContents, hClose, Handle)
 import System.IO.Error (catchIOError, isDoesNotExistError, isPermissionError)
 import System.Directory (withCurrentDirectory)
-import System.FilePath.Posix (takeDirectory, normalise, (</>))
+import System.FilePath.Posix (takeDirectory)
 
 import Language
-
--- combinators etc
-
-if' :: Bool -> a -> a -> a
-if' True  x _ = x
-if' False _ y = y
-
-($>) :: Functor f => f a -> b -> f b
-($>) = flip (<$)
-infixr 4 $>
-
-(<//>) :: FilePath -> FilePath -> FilePath
-path1 <//> path2 = normalise $ path1 </> path2
-infixr 5 <//>
-
-(|||) :: Monad m => m Bool -> m Bool -> m Bool
-(|||) = liftM2 (||)
-infixr 2 |||
+import Helper
 
 -- lexing and tokens
 
@@ -52,12 +39,7 @@ kappaStyle = haskellStyle
                , T.identLetter   = nota reservedIdLetter
                , T.opStart       = nota reservedOpStart
                , T.opLetter      = T.identLetter kappaStyle }
-  where
-    nonVisible       = isControl        ||| isSpace  ||| isSeparator
-    reservedIdLetter = nonVisible       ||| (`elem` ".:;`#|!$=~@()[]{}\"")
-    reservedOpStart  = reservedIdStart  ||| isLetter
-    reservedIdStart  = reservedIdLetter ||| isDigit
-    nota p = satisfy $ not . p
+  where nota p = satisfy $ not . p
 
 identifier    = T.identifier    lexer
 reserved      = T.reserved      lexer
@@ -76,7 +58,7 @@ semiSep       = T.semiSep       lexer
 
 -- parsing tools and internal types
 
-type Parser a = ParsecT String ParseState IO a
+type Parser m a = ParsecT String ParseState m a
 
 data ParseState = ParseState
   { scopeCounter :: Integer
@@ -105,19 +87,19 @@ offside col = getCol >>= \col' -> if col' > col
                     then return ()
                     else parserFail "indentation error"
 
-scopeId :: Integral a => a -> Parser Integer
+scopeId :: Monad m => Int -> Parser m Integer
 scopeId lvl = scopeStack <$> getState >>= go lvl
   where go n (l:ls) | n > 0     = go (n-1) ls
                     | n == 0    = return l
         go _ _ = unexpected "inaccessible scope"
 
-scopePop :: Parser Integer
+scopePop :: Monad m => Parser m Integer
 scopePop = do st <- getState
               let (x:xs) = scopeStack st
               putState $ st {scopeStack = xs}
               return x
 
-scopePush :: Parser Integer
+scopePush :: Monad m => Parser m Integer
 scopePush = do st <- getState
                let x = scopeCounter st
                    xs = scopeStack st
@@ -125,13 +107,13 @@ scopePush = do st <- getState
                              , scopeStack = x:xs}
                return x
 
-withScope :: Parser x -> Parser x
+withScope :: Monad m => Parser m x -> Parser m x
 withScope a = scopePush >> liftM2 const a scopePop
 
 phantoms :: [Term]
 phantoms = map (Var . ('|':)) $ kleene ['a'..'z']
 
-localCtxt :: Parser ([Term] -> Context)
+localCtxt :: Monad m => Parser m ([Term] -> Context)
 localCtxt = do st <- getState
                let (c:cs) = phantCtxtStack st
                putState $ st {phantCtxtStack = cs}
@@ -149,8 +131,8 @@ opScoped = liftM2 Atom sid idQual
 opScoped0= liftM2 Atom sid0 idQual
   where sid0= try $ char '@' >> scopeId 0
 
-op :: Parser Term
-op = opScoped <|> opComp <|> opNorm <?> "operator"
+oper :: Monad m => Parser m Term
+oper = opScoped <|> opComp <|> opNorm <?> "operator"
   where
     opSub = opScoped <|> opNorm <?> "operator"
     opComp = between grave grave (fudge <$> many (opSub <|> term))
@@ -160,15 +142,15 @@ op = opScoped <|> opComp <|> opNorm <?> "operator"
     fudge [t] = t
     fudge ts  = Compound ts
 
-ident :: Parser Term
+ident :: Monad m => Parser m Term
 ident = opScoped0 <|> idHash <|> idFree `labels` ["atom", "variable"]
   where
     idHash = char '#' >> (opScoped <|> atom <$> idQual)
     idFree = notop >> resolve <$> identifier
-    resolve id@(x:_) = if' (isLower x) Var atom id
+    resolve name = if' (isLower $ head name) Var atom name
     notop = try . option () $ operator >>= unexpected . ("operator " ++) . show
 
-term :: Parser Term
+term :: Monad m => Parser m Term
 term = termSugar <|> ident <|> tcomp
   where
     tcomp = (<?> "compound term") . parens . option term0 $
@@ -176,22 +158,19 @@ term = termSugar <|> ident <|> tcomp
     tasymm t = symbol "!" >> Asymm t <$> term
     tcomp' t = Compound . (t:) <$>  terms
 
-terms :: Parser [Term]
+terms :: Monad m => Parser m [Term]
 terms = many term
 
-terms1 :: Parser [Term]
-terms1 = many1 term
-
-termSugar :: Parser Term
+termSugar :: Monad m => Parser m Term
 termSugar = tdoll <|> tnat <|> tstr <|> tlist
   where
     tdoll = symbol "$" $> Asymm atomPlus atomMinus
     tnat  = nat <$> natural
     tstr  = str <$> stringLiteral
-    tlist = (<?> "list") . brackets $ liftM2 sexpr terms1
+    tlist = (<?> "list") . brackets $ liftM2 sexpr terms
                                       (option atomNil $ symbol "." >> term)
 
-decl :: Parser (Either [Declaration] [Definition])
+decl :: Monad m => Parser m (Either [Declaration] [Definition])
 decl = getCol >>= withScope . decl'
 decl' col = dterm <|> dmult <|> dsing
   where
@@ -203,10 +182,10 @@ decl' col = dterm <|> dmult <|> dsing
       where f c = dots >>= def [c lhs, c rhs] . Left
             g c =          def [c lhs]         (Right [c rhs])
 
-    dsing' lhs (Just op) rhs = terms <$> dsing' lhs' Nothing rhs'
+    dsing' lhs (Just op) rhs = halts <$> dsing' lhs' Nothing rhs'
       where lhs' = [op] ++ lhs ++ [termTerm]
             rhs' = [termTerm] ++ rhs ++ [op]
-            terms= fmap ([Terminus lhs', Terminus rhs'] ++)
+            halts= fmap ([Terminus lhs', Terminus rhs'] ++)
 
     def lhs (Left w)    = return . Left $ map (Declaration w) lhs
     def lhs (Right rhs) = Right <$> liftM2 (<|>) def0 def1 (Rule lhs rhs)
@@ -215,18 +194,21 @@ decl' col = dterm <|> dmult <|> dsing
     
     dots    = length <$> many1 dot
     dotrel  = (Left <$> dots)          <|> (symbol "=" >> Right <$> party)
-    relop   = (Nothing <$ symbol "=")  <|> (Just <$> op)
+    relop   = (Nothing <$ symbol "=")  <|> (Just <$> oper)
     party   = braces (semiSep context) <|> pure <$> try context
     context = liftM2 Context (option term0 term <* symbol "|") terms
 
-subDecls :: Column -> Parser ([Declaration], [Definition])
+subDecls :: Monad m => Column -> Parser m ([Declaration], [Definition])
 subDecls col = (join *** join) . partitionEithers <$> many (offside col >> decl) 
 
-prog :: Parser [Definition]
+prog :: Parser IO [Definition]
 prog = concat <$> manyTill (pimp <|> pdef) eof
   where
     pimp = reserved "import" >> stringLiteral >>= subParse
     pdef = decl >>= either (const $ unexpected "declaration") return
+
+input :: Monad m => Parser m [Declaration]
+input = decl <* eof >>= either return (const $ unexpected "definition")
 
 -- file level parsing
 
@@ -236,7 +218,7 @@ withResource path m = do
     rid <- resID fd
     bracket (fdToHandle fd) hClose (m rid)
 
-subParse :: FilePath -> Parser [Definition]
+subParse :: FilePath -> Parser IO [Definition]
 subParse path = getState >>= join . liftIO . attempt . withResource path . fetch
   where
     dir = takeDirectory path
@@ -265,20 +247,25 @@ die f = do msg <- E.Message . f <$> getState
            getPosition >>= bubble . E.newErrorMessage msg
 
 ioMsg :: FilePath -> IOError -> ParseState -> String
-ioMsg path e state = "[" ++ realPath ++ "] System error: " ++ explain e
+ioMsg path e state = "[" ++ realPath ++ "] System error: " ++ explain
   where
     realPath = relPath state <//> path
-    explain e | isDoesNotExistError e = "File does not exist."
-              | isPermissionError e   = "File not accessible."
-              | otherwise             = show e
+    explain | isDoesNotExistError e = "File does not exist."
+            | isPermissionError e   = "File not accessible."
+            | otherwise             = show e
 
-parsePrograms :: [FilePath] -> Parser [Definition]
+parsePrograms :: [FilePath] -> Parser IO [Definition]
 parsePrograms = fmap concat . mapM subParse
 
 loadPrograms :: [FilePath] -> IO (Either KappaError [Definition])
 loadPrograms paths = liftErr <$> runParserT (parsePrograms paths) emptyState "" ""
-  where liftErr (Left e) = Left $ ParseError e
-        liftErr (Right v)= Right v
 
-test :: String -> IO (Either ParseError [Definition])
-test = runParserT prog emptyState "<local>"
+liftErr :: Either ParseError a -> Either KappaError a
+liftErr (Left e) = Left $ ParseError e
+liftErr (Right v)= Right v
+
+testParse :: String -> IO (Either ParseError [Definition])
+testParse = runParserT prog emptyState "<local>"
+
+readInput :: String -> Either KappaError [Declaration]
+readInput = liftErr . runParser input emptyState "<local>"
