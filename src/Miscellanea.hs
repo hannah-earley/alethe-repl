@@ -69,6 +69,10 @@ flipEither :: Either a b -> Either b a
 flipEither (Left x)  = Right x
 flipEither (Right y) = Left y
 
+forceEither :: Show a => Either a b -> b
+forceEither (Left e)  = error $ "forceEither: " ++ show e
+forceEither (Right x) = x
+
 combineEithers :: [Either a b] -> Either [a] [b]
 combineEithers = go . partitionEithers
   where go ([],xs) = Right xs

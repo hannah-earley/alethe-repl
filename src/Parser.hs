@@ -2,6 +2,7 @@ module Parser
 ( loadPrograms
 , testParse
 , readInput
+, prelude
 ) where
 
 import Text.Parsec
@@ -29,12 +30,13 @@ import System.FilePath.Posix (takeDirectory)
 
 import Language
 import Helper
+import Miscellanea
 
 -- lexing and tokens
 
 lexer = T.makeTokenParser kappaStyle
 kappaStyle = haskellStyle
-               { T.reservedNames = [ "import" ]
+               { T.reservedNames = [ "import", "data" ]
                , T.identStart    = nota reservedIdStart
                , T.identLetter   = nota reservedIdLetter
                , T.opStart       = nota reservedOpStart
@@ -135,12 +137,9 @@ oper :: Monad m => Parser m Term
 oper = opScoped <|> opComp <|> opNorm <?> "operator"
   where
     opSub = opScoped <|> opNorm <?> "operator"
-    opComp = between grave grave (fudge <$> many (opSub <|> term))
+    opComp = between grave grave (term1 <$> many (opSub <|> term))
     opNorm = atom <$> operator
-
     grave = symbol "`"
-    fudge [t] = t
-    fudge ts  = Compound ts
 
 ident :: Monad m => Parser m Term
 ident = opScoped0 <|> idHash <|> idFree `labels` ["atom", "variable"]
@@ -185,7 +184,9 @@ decl' col = dterm <|> dmult <|> dsing
     dsing' lhs (Just op) rhs = halts <$> dsing' lhs' Nothing rhs'
       where lhs' = [op] ++ lhs ++ [termTerm]
             rhs' = [termTerm] ++ rhs ++ [op]
-            halts= fmap ([Terminus lhs', Terminus rhs'] ++)
+            halts' (Compound op') = [op']
+            halts' _              = []
+            halts = fmap $ (++) (Terminus <$> halts' op ++ [lhs', rhs'])
 
     def lhs (Left w)    = return . Left $ map (Declaration w) lhs
     def lhs (Right rhs) = Right <$> liftM2 (<|>) def0 def1 (Rule lhs rhs)
@@ -201,14 +202,32 @@ decl' col = dterm <|> dmult <|> dsing
 subDecls :: Monad m => Column -> Parser m ([Declaration], [Definition])
 subDecls col = (join *** join) . partitionEithers <$> many (offside col >> decl) 
 
-prog :: Parser IO [Definition]
-prog = concat <$> manyTill (pimp <|> pdef) eof
-  where
-    pimp = reserved "import" >> stringLiteral >>= subParse
-    pdef = decl >>= either (const $ unexpected "declaration") return
+defn :: Monad m => Parser m [Definition]
+defn = decl >>= either (const $ unexpected "declaration") return
 
-input :: Monad m => Parser m [Declaration]
-input = decl <* eof >>= either return (const $ unexpected "definition")
+rule :: Monad m => Parser m [Declaration]
+rule = decl >>= either return (const $ unexpected "definition")
+
+imprt :: Parser IO [Definition]
+imprt = reserved "import" >> stringLiteral >>= subParse
+
+datum :: Monad m => Parser m [Definition]
+datum = reserved "data" >> datum' <$> (terms <* semi)
+datum' t = halts ++ [mkDef . concat $ zipWith go ps (S.toList $ vars t)]
+  where (p0:ps) = phantoms
+        go p v = [ Declaration 1 (Context p [opv, termTerm])
+                 , Declaration 1 (Context p [termTerm, Var v, opv]) ]
+          where opv = Compound [atomDup, Var v]
+        t' = term1 t
+        halts = Terminus <$> [t, [atomDup, t']]
+        opt = Compound [atomDup, t']
+        mkDef = Rule [Context p0 [opt, termTerm]] [Context p0 [termTerm, t', opt]]
+
+prog :: Parser IO [Definition]
+prog = concat <$> manyTill (imprt <|> datum <|> defn) eof
+
+progSafe :: Monad m => Parser m [Definition]
+progSafe = concat <$> manyTill (datum <|> defn) eof
 
 -- file level parsing
 
@@ -268,4 +287,15 @@ testParse :: String -> IO (Either ParseError [Definition])
 testParse = runParserT prog emptyState "<local>"
 
 readInput :: String -> Either KappaError [Declaration]
-readInput = liftErr . runParser input emptyState "<local>"
+readInput = liftErr . runParser (rule <* eof) emptyState "<local>"
+
+prelude :: [Definition]
+prelude = forceEither . runParser progSafe prelState "<prelude>" $
+    "data ();\n\
+    \data Z;\n\
+    \data S x;\n\
+    \data Nil;\n\
+    \data Cons car cdr;\n\
+    \data Plus;\n\
+    \data Minus;"
+  where prelState = emptyState { scopeCounter = -1000000 }
