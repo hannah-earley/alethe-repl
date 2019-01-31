@@ -16,7 +16,10 @@ data Term = Atom     Integer String
 data Definition = Terminus [Term]
                 | Rule { lhs   :: [Context]
                        , rhs   :: [Context]
-                       , decls :: [Context] }
+                       , decls :: [Declaration] }
+                deriving (Show)
+
+data Declaration = Declaration { weight :: Int , rule :: Context}
                 deriving (Show)
 
 data Context = Context Term [Term]
@@ -26,6 +29,7 @@ data KappaError = ParseError PE.ParseError
                 | AmbiguityError [Definition]
                 -- | IrreversibilityError [Definition]
                 -- ...
+                deriving (Show)
 
 term0 = Compound []
 termTerm = Compound []
@@ -58,42 +62,55 @@ termRight (Asymm l _) = l
 termRight (Compound t) = Compound $ map termRight t
 termRight x = x
 
-termSplit :: Term -> (Term,Term)
-termSplit = liftM2 (,) termLeft termRight
+class Kappa a where
+    asplit :: a -> (a,a)
+    vars :: a -> Set String
+    unify :: a -> a -> Maybe (Map String [Term])
+    compatible :: a -> a -> Bool
 
-varsTerm :: Term -> Set String
-varsTerm (Atom _ _)  = S.empty
-varsTerm (Var v)     = S.singleton v
-varsTerm (Asymm l r) = S.union (varsTerm l) (varsTerm r)
-varsTerm (Compound t)= varsTerms t
+    varsplit :: a -> (Set String, a, a)
+    varsplit t = let (l,r) = asplit t in (vars t, l, r)
 
-varsTerms :: [Term] -> Set String
-varsTerms = S.unions . map varsTerm
+zipStrict :: [a] -> [b] -> Maybe [(a,b)]
+zipStrict []     []     = Just []
+zipStrict (x:xs) (y:ys) = (:) (x,y) <$> zipStrict xs ys
+zipStrict _      _      = Nothing
 
-unify :: Term -> Term -> Maybe (Map String [Term])
-unify a@(Atom _ _) b@(Atom _ _) = if a == b then Just M.empty else Nothing
-unify (Var v)      t            = Just (M.singleton v [t])
-unify (Compound s) (Compound t) = unifies s t
-unify _            _            = Nothing
+zipWithStrict :: (a -> b -> c) -> [a] -> [b] -> Maybe [c]
+zipWithStrict f xs ys = map (uncurry f) <$> zipStrict xs ys
 
-unifies :: [Term] -> [Term] -> Maybe (Map String [Term])
-unifies []     []     = Just M.empty
-unifies (x:xs) (y:ys) = liftM2 (M.unionWith (++)) (unifies xs ys) (unify x y)
-unifies _      _      = Nothing
+instance Kappa a => Kappa [a] where
+    asplit = unzip . map asplit
+    vars = S.unions . map vars
+    unify xs ys = M.unionsWith (++) <$> (zipWithStrict unify xs ys >>= sequence)
+    compatible xs ys = maybe False (all $ uncurry compatible) $ zipStrict xs ys
 
-compatible :: Term -> Term -> Bool
-compatible (Var _)      _             = True
-compatible _            (Var _)       = True
-compatible a@(Atom _ _) b@(Atom _ _)  = a == b
-compatible (Asymm l r)  t             = compatible l t || compatible r t
-compatible t            a@(Asymm _ _) = compatible a t
-compatible (Compound s) (Compound t)  = compatibles s t
-compatible _            _             = False
+instance Kappa Term where
+    asplit = liftM2 (,) termLeft termRight
 
-compatibles :: [Term] -> [Term] -> Bool
-compatibles []     []     = True
-compatibles (x:xs) (y:ys) = compatible x y && compatibles xs ys
-compatibles _      _      = False
+    vars (Atom _ _)  = S.empty
+    vars (Var v)     = S.singleton v
+    vars (Asymm l r) = S.union (vars l) (vars r)
+    vars (Compound t)= vars t
 
-compatiblec :: Context -> Context -> Bool
-compatiblec (Context c1 p1) (Context c2 p2) = compatible c1 c2 && compatibles p1 p2
+    unify a@(Atom _ _) b@(Atom _ _) = if a == b then Just M.empty else Nothing
+    unify (Var v)      t            = Just (M.singleton v [t])
+    unify (Compound s) (Compound t) = unify s t
+    unify _            _            = Nothing
+
+    compatible (Var _)      _             = True
+    compatible _            (Var _)       = True
+    compatible a@(Atom _ _) b@(Atom _ _)  = a == b
+    compatible (Asymm l r)  t             = compatible l t || compatible r t
+    compatible t            a@(Asymm _ _) = compatible a t
+    compatible (Compound s) (Compound t)  = compatible s t
+    compatible _            _             = False
+
+instance Kappa Context where
+    asplit (Context c p) = let (c1,c2) = asplit c
+                               (p1,p2) = asplit p
+                           in (Context c1 p1, Context c2 p2)
+
+    vars (Context c p) = S.union (vars c) (vars p)
+    unify (Context c1 p1) (Context c2 p2) = liftM2 (M.union) (unify p1 p2) (unify c1 c2)
+    compatible (Context c1 p1) (Context c2 p2) = compatible c1 c2 && compatible p1 p2

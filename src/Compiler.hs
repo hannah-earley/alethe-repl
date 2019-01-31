@@ -2,11 +2,14 @@ module Compiler where
 
 import Language
 import Parser
+import Miscellanea
 
+import Data.Set (Set)
+import qualified Data.Set as S
+import Data.Map (Map)
+import qualified Data.Map.Strict as M
 import Data.Vector (Vector,(!))
 import qualified Data.Vector as V
-import Data.Graph (Graph)
-import qualified Data.Graph as G
 import qualified Data.Array.ST as A
 import qualified Data.Array as Ar
 import Control.Monad.ST (runST,ST)
@@ -14,15 +17,28 @@ import Control.Exception (assert)
 import Control.Monad (filterM)
 import qualified Data.Ix as I
 import Data.List (nub)
+import Data.Maybe (catMaybes)
 
+import Debug.Trace (trace)
+
+data Strategy = StratStop [Term]
+              | Strategy { lpatt :: [Context]
+                         , rules :: Vector Context
+                         , plan  :: [Either Int Int]
+                         , rpatt :: [Context] }
+              deriving (Show)
+
+compFiles :: [FilePath] -> IO (Either KappaError [Strategy])
 compFiles ps = loadPrograms ps >>= return . (compile =<<)
 
--- compile :: [Definition] -> Either KappaError ()
-compile ds = cAmbi ds >>= return
+compile :: [Definition] -> Either KappaError [Strategy]
+compile ds = cAmbi ds >> return (concatMap tgSolve ds)
 
-
+compTest ps = do Right defs <- loadPrograms ps
+                 return defs
 
 -- phase 1: ambiguity checks
+-- pug = pattern unifying graph
 
 cAmbi :: [Definition] -> Either KappaError (Vector Definition, Vector (Int,Context))
 cAmbi ds = handle . map resolve $ runST $ pugBuild ctxts >>= pugAmbiguities
@@ -44,7 +60,7 @@ pugBuild ctxts =
        sequence_ $ do 
           x <- range 0       n
           y <- range (x + 1) n
-          let e = compatiblec (get x) (get y)
+          let e = compatible (get x) (get y)
               w = A.writeArray arr
           return $ w (x,y) e >> w (y,x) e
        return arr
@@ -71,3 +87,88 @@ pugAmbiguities arr =
     w = A.writeArray arr
     w2 (i,j) v = w (i,j) v >> w (j,i) v
 
+-- phase 2: resolving implementation paths
+-- tg = transition graph
+
+tgBuild :: [Declaration] -> [Set String] -> [(Set String, [(Either Int Int, Int, Set String)])]
+tgBuild rules = build S.empty . S.fromList
+  where
+    transitions = concat $ zipWith mkTrans [0..] rules
+    mkTrans n (Declaration w (Context c p))
+      = [(Right n,w,cv,pv),(Left n,w,pv,cv)]
+      where cv = vars c
+            pv = vars p
+    goTrans node (lab,weight,lhs,rhs)
+      | (lhs `S.isSubsetOf` node) && not (rhs `S.isSubsetOf` node)
+                  = Just (lab, weight, (node S.\\ lhs) `S.union` rhs)
+      | otherwise = Nothing
+
+    walk node = catMaybes $ map (goTrans node) transitions
+    es2ns = S.fromList . map (\(_,_,x) -> x)
+    build visited from
+      | S.null from = []
+      | otherwise   = assocs ++ assocs'
+      where
+        assocs = map (\n -> (n,walk n)) $ S.elems from
+        next = S.unions (map (es2ns . snd) assocs) S.\\ visited
+        assocs' = build (visited `S.union` from) next
+
+adjListEdges :: [(v, [(l, w, v)])] -> [(v,l,w,v)]
+adjListEdges = concatMap (\(u,vs) -> map (\(l,w,v) -> (u,l,w,v)) vs)
+
+floydWarshall :: (Ord v, Ord w, Num w, Show w, Show v, Show l) => [(v,l,w,v)] -> (v -> v -> (Extended w,[v],[l]))
+floydWarshall [] = \u v -> if u == v then (Finite 0,[u],[]) else error "no route possible"
+floydWarshall edges 
+  -- | trace ("\n\nfloydWarshall:\n" ++ show edges ++ "\n" ++ show vertices ++ "\n" ++ show vertIdMap ++ "\n" ++ show labels ++ "\n\n") False = undefined
+  | otherwise = let arr = fw n in shortestPath arr
+  where
+    vertices = nub $ concatMap (\(l,_,_,r) -> [l,r]) edges
+    vertIdMap = M.fromList $ zip vertices [0..]
+    idVert = let vec = V.fromList vertices in (vec V.!)
+    vertId = (vertIdMap M.!)
+    -- vertId v = trace ("vert id: " ++ show v) (vertIdMap M.! v)
+
+    weights = M.fromList $ map (\(l,_,w,r) -> ((vertId l, vertId r), w)) edges
+    weight = curry $ maybe PosInfinite Finite . (weights M.!?)
+
+    labels = M.fromList $ map (\(l,x,_,r) -> ((vertId l, vertId r), x)) edges
+    label = curry (labels M.!)
+    -- label i j = trace ("label: " ++ show (i,j)) (curry (labels M.!) 0 0)
+
+    n = length vertices - 1
+    mkArr f = Ar.array ((0,0),(n,n)) [((i,j), f i j) | i <- [0..n], j <- [0..n]]
+    fw 0 = mkArr $ \i j -> (weight i j, j)
+    fw k = let prev = fw (k-1) in mkArr $ \i j -> go prev i j k
+
+    go arr i j k
+      | dij' < dij = (dij', nik)
+      | otherwise  = (dij,  nij)
+      where (dij, nij) = arr Ar.! (i,j)
+            (dik, nik) = arr Ar.! (i,k)
+            (dkj, _)   = arr Ar.! (k,j)
+            dij' = dik + dkj
+
+    shortestPath arr u v
+      -- | trace ("sPath: " ++ show (u,v) ++ "\n" ++ show arr) False = undefined
+      | otherwise = (w, map idVert thePath, zipWith label thePath (tail thePath))
+      where thePath = path u'
+            u' = vertId u
+            v' = vertId v
+            path x | trace ("path: " ++ show x ++ ", " ++ show (idVert x)) False = undefined
+                   | x == v'   = [v']
+                   | otherwise = x : path (snd $ arr Ar.! (x,v'))
+            w = fst $ arr Ar.! (u',v')
+
+tgSolve :: Definition -> [Strategy]
+tgSolve (Terminus t) = let (l,r) = asplit t in StratStop <$> nub [l,r]
+tgSolve (Rule l r d) = [Strategy l1 vc pl1 r1, Strategy l2 vc pl2 r2]
+  where (nl,l1,r2) = varsplit l
+        (nr,l2,r1) = varsplit r
+
+        vc = V.fromList . flip map d $ \(Declaration _ c) -> c
+        es = adjListEdges $ tgBuild d [nl,nr]
+        (_,_,pl1) = floydWarshall es nl nr
+        pl2 = reverse $ map flipEither pl1
+
+        flipEither (Left x)  = Right x
+        flipEither (Right y) = Left y
