@@ -6,7 +6,8 @@ import Compiler
 
 test x = do Right prog <- compile ["kap/test.k"]
             let Right cs = readInput x
-            return $ map (match prog . _decRule) cs
+            return $ map (match prog . pure . _decRule) cs
+
 
 main :: IO ()
 main = putStrLn "Hello, Haskell!"

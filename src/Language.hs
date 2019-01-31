@@ -61,8 +61,9 @@ ruleInfixP _ _ = Nothing
 
 showInfix :: Term -> String
 showInfix (Compound t) = "`" ++ showSp t ++ "`"
-showInfix (Atom 0 a@(x:_)) | not (invalidAtom a) && not (reservedOpStart x) = a
-showInfix (Atom n a) | not (invalidAtom a) = "~" ++ show n ++ ":" ++ a
+showInfix (Atom 0 a) | validOp a = a
+showInfix (Atom n a) | validOp a = "~" ++ show n ++ ":" ++ a
+showInfix (Atom n []) = "~" ++ show n ++ ":"
 showInfix t = "`" ++ show t ++ "`"
 
 showCtxts [c] = show c
@@ -96,6 +97,9 @@ reservedOpStart  = reservedIdStart  ||| isLetter ||| (`elem` "'_")
 
 invalidAtom (x:xs) = isLower x || reservedIdStart x || any reservedIdLetter xs
 invalidAtom [] = False
+
+validOp a@(x:_) = not (invalidAtom a) && not (reservedOpStart x)
+validOp []      = False
 
 resolveAtomVar name@(x:_)
   | isLower x || x `elem` "_" = Var name
@@ -243,11 +247,11 @@ showErrDefs = concatMap (("\n    "++) . show . stripChildren)
 
 -- evaluation
 
-match :: Program -> Context -> [(Int,Strategy)]
+match :: Program -> [Context] -> [(Int,Strategy)]
 match (Program []) _ = []
 match (Program (x:xs)) c =
     let rest = map (first succ) $ match (Program xs) c
     in case x of
-        StratHalt l        | compatible l (_cTerm c) -> (0,x) : rest
-        Strategy [l] _ _ _ | compatible l c          -> (0,x) : rest
-        _                                            ->         rest
+        StratHalt p       | compatible [p] (map _cTerm c) -> (0,x) : rest
+        Strategy  p _ _ _ | compatible  p  c              -> (0,x) : rest
+        _                                                 ->         rest
