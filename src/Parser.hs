@@ -145,8 +145,7 @@ ident :: Monad m => Parser m Term
 ident = opScoped0 <|> idHash <|> idFree `labels` ["atom", "variable"]
   where
     idHash = char '#' >> (opScoped <|> atom <$> idQual)
-    idFree = notop >> resolve <$> identifier
-    resolve name = if' (isLower $ head name) Var atom name
+    idFree = notop >> resolveAtomVar <$> identifier
     notop = try . option () $ operator >>= unexpected . ("operator " ++) . show
 
 term :: Monad m => Parser m Term

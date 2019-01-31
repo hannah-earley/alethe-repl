@@ -86,10 +86,14 @@ instance Show Context where
 nonVisible       = isControl        ||| isSpace  ||| isSeparator
 reservedIdLetter = nonVisible       ||| (`elem` ".:;`#|!$=~@()[]{}\"")
 reservedIdStart  = reservedIdLetter ||| isDigit
-reservedOpStart  = reservedIdStart  ||| isLetter ||| (`elem` "'")
+reservedOpStart  = reservedIdStart  ||| isLetter ||| (`elem` "'_")
 
 invalidAtom (x:xs) = isLower x || reservedIdStart x || any reservedIdLetter xs
 invalidAtom [] = False
+
+resolveAtomVar name@(x:_)
+  | isLower x || x `elem` "_" = Var name
+resolveAtomVar name           = atom name
 
 atom = Atom 0
 term0 = Compound []
