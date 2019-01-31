@@ -5,10 +5,6 @@ import Control.Applicative ((<$))
 import System.FilePath.Posix (normalise, (</>))
 import Data.List (intercalate)
 
-if' :: Bool -> a -> a -> a
-if' True  x _ = x
-if' False _ y = y
-
 ($>) :: Functor f => f a -> b -> f b
 ($>) = flip (<$)
 infixr 4 $>
