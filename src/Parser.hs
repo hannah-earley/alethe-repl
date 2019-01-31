@@ -191,7 +191,7 @@ termSugar = tdoll <|> tnat <|> tstr <|> tlist
     tlist = (<?> "list") . brackets $ liftM2 sexpr terms1
                                       (option atomNil $ symbol "." >> term)
 
-decl :: Parser (Either [Context] [Definition])
+decl :: Parser (Either [Declaration] [Definition])
 decl = getCol >>= withScope . decl'
 decl' col = dterm <|> dmult <|> dsing
   where
@@ -200,25 +200,26 @@ decl' col = dterm <|> dmult <|> dsing
     dsing = join $ dsing' <$> terms <*> relop <*> terms
 
     dsing' lhs Nothing   rhs = localCtxt >>= liftM2 (<|>) f g
-      where f c = dot >> def [c lhs, c rhs] Nothing
-            g c =        def [c lhs]       (Just [c rhs])
+      where f c = dots >>= def [c lhs, c rhs] . Left
+            g c =          def [c lhs]         (Right [c rhs])
 
     dsing' lhs (Just op) rhs = terms <$> dsing' lhs' Nothing rhs'
       where lhs' = [op] ++ lhs ++ [termTerm]
             rhs' = [termTerm] ++ rhs ++ [op]
             terms= fmap ([Terminus lhs', Terminus rhs'] ++)
 
-    def lhs Nothing    = return (Left lhs)
-    def lhs (Just rhs) = Right <$> liftM2 (<|>) def0 def1 (Rule lhs rhs)
+    def lhs (Left w)    = return . Left $ map (Declaration w) lhs
+    def lhs (Right rhs) = Right <$> liftM2 (<|>) def0 def1 (Rule lhs rhs)
     def0 top = semi  $> [top []]
     def1 top = colon >> uncurry ((:) . top) <$> subDecls col
     
-    dotrel  = (Nothing <$ dot)         <|> (symbol "=" >> Just <$> party)
+    dots    = length <$> many1 dot
+    dotrel  = (Left <$> dots)          <|> (symbol "=" >> Right <$> party)
     relop   = (Nothing <$ symbol "=")  <|> (Just <$> op)
     party   = braces (semiSep context) <|> pure <$> try context
     context = liftM2 Context (option term0 term <* symbol "|") terms
 
-subDecls :: Column -> Parser ([Context], [Definition])
+subDecls :: Column -> Parser ([Declaration], [Definition])
 subDecls col = (join *** join) . partitionEithers <$> many (offside col >> decl) 
 
 prog :: Parser [Definition]
