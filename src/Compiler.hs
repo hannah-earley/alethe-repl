@@ -17,11 +17,17 @@ import qualified Data.Ix as I
 import Data.List (nub)
 import Data.Maybe (catMaybes)
 
-compFiles :: [FilePath] -> IO (Either KappaError Program)
-compFiles ps = loadPrograms ps >>= return . (compile =<<)
+compWith :: [Definition] -> [FilePath] -> IO (Either KappaError Program)
+compWith prel ps = loadPrograms ps >>= return . (compile' . (prel++) =<<)
 
-compile :: [Definition] -> Either KappaError Program
-compile ds = fmap Program $ cAmbi ds >> tgSolves ds
+compile :: [FilePath] -> IO (Either KappaError Program)
+compile = compWith prelude
+
+compile0 :: [FilePath] -> IO (Either KappaError Program)
+compile0 = compWith []
+
+compile' :: [Definition] -> Either KappaError Program
+compile' ds = fmap Program $ cAmbi ds >> tgSolves (ds)
 
 -- phase 1: ambiguity checks
 -- pug = pattern unifying graph

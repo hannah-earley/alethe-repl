@@ -22,11 +22,11 @@ data Term = Atom     Integer String
           deriving (Eq)
 
 data Definition = Terminus [Term]
-                | Rule { _dLPatt :: [Context]
-                       , _dRPatt :: [Context]
-                       , _dRules :: [Declaration] }
+                | Rule { _defLPatt :: [Context]
+                       , _defRPatt :: [Context]
+                       , _defRules :: [Declaration] }
 
-data Declaration = Declaration { weight :: Int , rule :: Context}
+data Declaration = Declaration { _decWeight :: Int , _decRule :: Context}
 
 data Context = Context Term [Term]
 
@@ -40,8 +40,24 @@ instance Show Term where
 
 instance Show Definition where
     show (Terminus t)         = "! " ++ showSp t ++ ";"
-    show (Rule lhs rhs rules) = showCtxts lhs ++ " = " ++ showCtxts rhs
-                                              ++ showRules show rules
+    show (Rule lhs rhs rules) = showRuleHead lhs rhs ++ showRules show rules
+
+showRuleHead lhs rhs = case ruleInfixP lhs rhs of
+                         Just (lhs',op,rhs') ->
+                            showSp lhs' ++ " " ++ showInfix op ++ " " ++ showSp rhs'
+                         Nothing -> showSp lhs ++ " = " ++ showSp rhs
+
+ruleInfixP :: [Context] -> [Context] -> Maybe ([Term], Term, [Term])
+ruleInfixP [Context c1@(Var ('|':_)) (op:lhs@(_:_))] [Context c2 (tt:rhs@(_:_))]
+  | c1 == c2 && op == last rhs && last lhs == termTerm && tt == termTerm
+              = Just (init lhs, op, init rhs)
+ruleInfixP _ _ = Nothing
+
+showInfix :: Term -> String
+showInfix (Compound t) = "`" ++ showSp t ++ "`"
+showInfix (Atom 0 a@(x:_)) | not (invalidAtom a) && not (reservedOpStart x) = a
+showInfix (Atom n a) | not (invalidAtom a) = "~" ++ show n ++ ":" ++ a
+showInfix t = "`" ++ show t ++ "`"
 
 showCtxts [c] = show c
 showCtxts cs = "{ " ++ showSemi cs ++ " }"
@@ -54,7 +70,7 @@ showAtom n a | at == atomZero = "0"
              | at == atomNil  = "[]"
              where at = Atom n a
 showAtom 0 a = showAtom' a
-showAtom n a = "~" ++ show n ++ ":" ++ showAtom' a
+showAtom n a = "#~" ++ show n ++ ":" ++ if invalidAtom a then show a else a
 
 showComp t = let c = Compound t in
              case catMaybes [show <$> nat' c, show <$> str' c, sexpr' c] of
@@ -78,11 +94,13 @@ invalidAtom [] = False
 atom = Atom 0
 term0 = Compound []
 termTerm = Compound []
-phony = Atom (-1) ""
+term1 = list1 id Compound
+
 atomZero = atom "Z"
 atomSucc = atom "S"
 atomNil = atom "Nil"
 atomCons = atom "Cons"
+atomDup = atom "Dup"
 atomPlus = atom "Plus"
 atomMinus = atom "Minus"
 atomChar c = atom ['\'', c]
@@ -190,9 +208,14 @@ data KappaError = ParseError PE.ParseError
 
 instance Show Strategy where
     show (StratHalt t) = show (Terminus t)
-    show (Strategy l d p r) = showCtxts l ++ " = " ++ showCtxts r ++ showRules showp p
+    show (Strategy l d p r) = showStratHead l r ++ showRules showp p
       where showp (Left  n) = "< " ++ show (d ! n) ++ "."
             showp (Right n) = "> " ++ show (d ! n) ++ "."
+
+showStratHead l r =
+    case ruleInfixP l r of
+        Just _  -> "> " ++ showRuleHead l r
+        Nothing -> "< " ++ showRuleHead r l
 
 instance Show Program where
     show (Program xs) = showMany "\n" xs

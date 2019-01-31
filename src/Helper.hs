@@ -25,3 +25,7 @@ showMany :: Show a => String -> [a] -> String
 showMany sep = intercalate sep . map show
 showSp = showMany " "
 showSemi = showMany "; "
+
+list1 :: (a -> b) -> ([a] -> b) -> [a] -> b
+list1 f _ [x] = f x
+list1 _ g xs  = g xs
