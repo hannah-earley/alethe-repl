@@ -1,10 +1,8 @@
 module Miscellanea where
 
-import Data.Set (Set)
-import qualified Data.Set as S
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as M
-import Data.Heap (Heap,Entry(..))
+import Data.Heap (Entry(..))
 import qualified Data.Heap as H
 import Data.List (nub)
 import Data.Either (partitionEithers)
@@ -13,14 +11,15 @@ data Extended a = NegInfinite | Finite a | PosInfinite
                 deriving (Eq, Ord, Show)
 
 instance (Ord a, Num a) => Num (Extended a) where
-    PosInfinite + NegInfinite = error "can't add positive and negative infinity"
+    PosInfinite + NegInfinite = error "PosInfinite + NegInfinite is undefined"
     PosInfinite + _ = PosInfinite
     NegInfinite + _ = NegInfinite
     Finite x + Finite y = Finite (x + y)
     Finite x + y = y + Finite x
 
-    PosInfinite * x | x < 0 = NegInfinite
-                    | x > 0 = PosInfinite
+    PosInfinite * x | x < 0     = NegInfinite
+                    | x > 0     = PosInfinite
+                    | otherwise = error "PosInfinite * (Finite x) is undefined"
     NegInfinite * x = PosInfinite * negate x
     Finite x * Finite y = Finite (x * y)
     Finite x * y = y * Finite x
@@ -61,7 +60,7 @@ dijkstra' alist u = go' 0 u queue
     go' d0 node = go . H.map update
       where
         neighbours = M.fromList $ maybe [] (map $ \(l,w,n) -> (n,(w,l))) (alist M.!? node)
-        update e@(Entry d (x,p)) = case neighbours M.!? x of
+        update e@(Entry d (x,_)) = case neighbours M.!? x of
             Just (w,l) -> let d' = Finite (d0 + w) in
                           if d' < d then Entry d' (x,Just (l,node)) else e
             Nothing -> e 
@@ -77,4 +76,4 @@ combineEithers = go . partitionEithers
 
 mapLeft :: (a -> b) -> Either a c -> Either b c
 mapLeft f (Left x)  = Left (f x)
-mapLeft f (Right y) = Right y
+mapLeft _ (Right y) = Right y
