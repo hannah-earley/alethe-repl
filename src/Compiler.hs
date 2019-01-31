@@ -91,7 +91,7 @@ tgBuild rules = build S.empty . S.fromList
       where cv = vars c
             pv = vars p
     goTrans node (lab,wei,lvars,rvars)
-      | (lvars `S.isSubsetOf` node) && not (rvars `S.isSubsetOf` node)
+      | (lvars `S.isSubsetOf` node) && (S.null rvars || not (rvars `S.isSubsetOf` node))
                   = Just (lab, wei, (node S.\\ lvars) `S.union` rvars)
       | otherwise = Nothing
 
