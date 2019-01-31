@@ -109,6 +109,7 @@ atom = Atom 0
 term0 = Compound []
 termTerm = Compound []
 term1 = list1 id Compound
+phony = Atom (-999999999)
 
 atomZero = atom "Z"
 atomSucc = atom "S"
@@ -247,6 +248,14 @@ showErrDefs = concatMap (("\n    "++) . show . stripChildren)
 
 -- evaluation
 
+data EvalStatus = EvalOk
+                | EvalStuck
+                | EvalAmbiguous
+                | EvalUndefined
+                | EvalMalformed
+                | EvalCorrupt
+                deriving (Eq,Ord,Show)
+
 match :: Program -> [Context] -> [(Int,Strategy)]
 match (Program []) _ = []
 match (Program (x:xs)) c =
@@ -255,3 +264,59 @@ match (Program (x:xs)) c =
         StratHalt p       | compatible [p] (map _cTerm c) -> (0,x) : rest
         Strategy  p _ _ _ | compatible  p  c              -> (0,x) : rest
         _                                                 ->         rest
+
+eval :: Strategy -> [Context] -> Either EvalStatus [Context]
+eval = undefined
+
+-- the status output indicates whether or not the computation successfully completed
+-- evaluate requires its input to be in a halting state (i.e. an initial
+--    state) so that it can deterministically pick an execution direction
+evaluate :: Program -> [Context] -> (EvalStatus, [Context])
+evaluate prog entity = case match prog entity of
+    []                  -> (EvalUndefined, entity)
+    [(m,StratHalt _),_] -> evaluate' prog m entity
+    [_,(n,StratHalt _)] -> evaluate' prog n entity
+    xs | all sh xs      -> (EvalOk, entity)
+    _                   -> (EvalCorrupt, entity)
+  where sh (_, StratHalt _) = True
+        sh _                = False
+
+-- evaluate' takes a previous strategy (Int) and continues in the same direction
+evaluate' :: Program -> Int -> [Context] -> (EvalStatus, [Context])
+evaluate' prog prev entity = case match prog entity of
+    [(m,StratHalt _)] | m == prev               -> (EvalOk,        entity)
+    [(m,s1),(n,s2)]   | m == prev               -> go n s2
+                      | n == prev               -> go m s1
+    xs                | any ((==prev) . fst) xs -> (EvalAmbiguous, entity)
+    _                                           -> (EvalCorrupt,   entity)
+  where go next strat = case eval strat entity of
+                          Right entity' -> evaluate' prog next entity'
+                          Left EvalOk   -> (EvalCorrupt, entity)
+                          Left e        -> (e,           entity)
+
+combineEvals :: [(EvalStatus, a)] -> (EvalStatus, [a])
+combineEvals = first maximum . unzip
+
+evalMap :: (a -> b) -> (EvalStatus, a) -> (EvalStatus, b)
+evalMap f (e, x) = (e, f x)
+
+evaluateRec :: Program -> [Context] -> (EvalStatus, [Context])
+evaluateRec prog = combineEvals . map goc
+  where
+    goc (Context c ent) = case go (Compound ent) of
+                            (e, Compound ent') -> (e,           Context c ent')
+                            _                  -> (EvalCorrupt, Context c ent)
+
+    go (Compound ts) = evalMap Compound $
+                       case combineEvals $ map go ts of
+                         (EvalOk,ts') -> evaluateLocal prog ts'
+                         (e,ts')      -> (e, ts')
+    go x@(Asymm _ _) = (EvalMalformed, x)
+    go x             = (EvalOk, x)
+
+evaluateLocal :: Program -> [Term] -> (EvalStatus, [Term])
+evaluateLocal prog ts =
+    let c = phony "local" in
+    case evaluate prog [Context c ts] of
+        (e, [Context c' ts']) | c == c' -> (e,           ts')
+        _                               -> (EvalCorrupt, ts)
