@@ -107,7 +107,7 @@ tgBuild rules = build S.empty . S.fromList
         assocs' = build (visited `S.union` from) next
 
 tgSolve :: Definition -> Either KappaError [Strategy]
-tgSolve = mapLeft (CompilationError . pure) . tgSolve'
+tgSolve = mapLeft (ReversibilityError . pure) . tgSolve'
 
 tgSolve' :: Definition -> Either Definition [Strategy]
 tgSolve'   (Terminus t) = let (l,r) = asplit t in Right $ StratHalt <$> nub [l,r]
@@ -121,4 +121,4 @@ tgSolve' x@(Rule l r d) =
         mpl = dijkstra (M.fromList $ tgBuild d [nl,nr]) nl nr
 
 tgSolves :: [Definition] -> Either KappaError [Strategy]
-tgSolves = mapLeft CompilationError . fmap concat . combineEithers . map tgSolve'
+tgSolves = mapLeft ReversibilityError . fmap concat . combineEithers . map tgSolve'

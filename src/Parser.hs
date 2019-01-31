@@ -9,7 +9,6 @@ import Text.Parsec
 import qualified Text.Parsec.Error as E
 import qualified Text.Parsec.Token as T
 import Text.Parsec.Language (haskellStyle)
-import Data.Char
 import Data.Either (partitionEithers)
 
 import Control.Applicative ((<*), (<$))
@@ -213,12 +212,12 @@ imprt = reserved "import" >> stringLiteral >>= subParse
 datum :: Monad m => Parser m [Definition]
 datum = reserved "data" >> datum' <$> (terms <* semi)
 datum' t = halts ++ [mkDef . concat $ zipWith go ps (S.toList $ vars t)]
-  where (p0:ps) = phantoms
+  where (p0:p1:ps) = phantoms
         go p v = [ Declaration 1 (Context p [opv, termTerm])
                  , Declaration 1 (Context p [termTerm, Var v, opv]) ]
           where opv = Compound [atomDup, Var v]
         t' = term1 t
-        halts = Terminus <$> [t, [atomDup, t']]
+        halts = Terminus <$> [t, [atomDup, t'], [opt, termTerm], [termTerm, p1, opt]]
         opt = Compound [atomDup, t']
         mkDef = Rule [Context p0 [opt, termTerm]] [Context p0 [termTerm, t', opt]]
 

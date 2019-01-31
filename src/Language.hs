@@ -9,6 +9,7 @@ import Data.Char
 import Data.Maybe (catMaybes)
 import Data.List (intercalate)
 import Control.Monad (liftM2)
+import Control.Arrow (first)
 import qualified Text.Parsec.Error as PE
 
 import Helper
@@ -26,9 +27,11 @@ data Definition = Terminus [Term]
                        , _defRPatt :: [Context]
                        , _defRules :: [Declaration] }
 
-data Declaration = Declaration { _decWeight :: Int , _decRule :: Context}
+data Declaration = Declaration { _decWeight :: Int
+                               , _decRule   :: Context }
 
-data Context = Context Term [Term]
+data Context = Context { _cOHC  :: Term
+                       , _cTerm :: [Term]}
 
 -- display, sugar, properties, etc
 
@@ -45,7 +48,10 @@ instance Show Definition where
 showRuleHead lhs rhs = case ruleInfixP lhs rhs of
                          Just (lhs',op,rhs') ->
                             showSp lhs' ++ " " ++ showInfix op ++ " " ++ showSp rhs'
-                         Nothing -> showSp lhs ++ " = " ++ showSp rhs
+                         Nothing -> showRuleHead' lhs rhs
+showRuleHead' [Context c1@(Var ('|':_)) lp] [Context c2 rp]
+    | c1 == c2 = showSp lp ++ " = " ++ showSp rp
+showRuleHead' lhs rhs = showCtxts lhs ++ " = " ++ showCtxts rhs
 
 ruleInfixP :: [Context] -> [Context] -> Maybe ([Term], Term, [Term])
 ruleInfixP [Context c1@(Var ('|':_)) (op:lhs@(_:_))] [Context c2 (tt:rhs@(_:_))]
@@ -195,7 +201,7 @@ instance Kappa Context where
     unify (Context c1 p1) (Context c2 p2) = liftM2 (M.union) (unify p1 p2) (unify c1 c2)
     compatible (Context c1 p1) (Context c2 p2) = compatible c1 c2 && compatible p1 p2
 
--- evaluation
+-- compilation
 
 newtype Program = Program [Strategy]
 
@@ -207,8 +213,7 @@ data Strategy = StratHalt [Term]
 
 data KappaError = ParseError PE.ParseError
                 | AmbiguityError [Definition]
-                | CompilationError [Definition]
-                deriving (Show)
+                | ReversibilityError [Definition]
 
 instance Show Strategy where
     show (StratHalt t) = show (Terminus t)
@@ -217,9 +222,32 @@ instance Show Strategy where
             showp (Right n) = "> " ++ show (d ! n) ++ "."
 
 showStratHead l r =
-    case ruleInfixP l r of
-        Just _  -> "> " ++ showRuleHead l r
-        Nothing -> "< " ++ showRuleHead r l
+    case ruleInfixP r l of
+        Just _  -> "< " ++ showRuleHead r l
+        Nothing -> "> " ++ showRuleHead l r
 
 instance Show Program where
     show (Program xs) = showMany "\n" xs
+
+instance Show KappaError where
+    show (ParseError e) = "Parse error!: " ++ show e
+    show (AmbiguityError d) = "Non-determinism detected between the following rules!:" ++ showErrDefs d
+    show (ReversibilityError d) = "Couldn't find a reversible execution plan for the following!:" ++ showErrDefs d
+
+stripChildren :: Definition -> Definition
+stripChildren (Terminus t) = Terminus (t)
+stripChildren (Rule l r _) = Rule l r []
+
+showErrDefs :: [Definition] -> String
+showErrDefs = concatMap (("\n    "++) . show . stripChildren)
+
+-- evaluation
+
+match :: Program -> Context -> [(Int,Strategy)]
+match (Program []) _ = []
+match (Program (x:xs)) c =
+    let rest = map (first succ) $ match (Program xs) c
+    in case x of
+        StratHalt l        | compatible l (_cTerm c) -> (0,x) : rest
+        Strategy [l] _ _ _ | compatible l c          -> (0,x) : rest
+        _                                            ->         rest
