@@ -7,7 +7,7 @@ import qualified Data.Map.Strict as M
 import Data.Vector (Vector,(!))
 import Data.Char
 import Data.Maybe (catMaybes)
-import Data.List (intercalate)
+import Data.List (intercalate,partition)
 import Control.Monad (liftM2, foldM, guard)
 import Control.Arrow (first)
 import qualified Text.Parsec.Error as PE
@@ -348,27 +348,29 @@ isHalting (Program (_ : xs)) c = isHalting (Program xs) c
 -- evaluate requires its input to be in a halting state (i.e. an initial
 --    state) so that it can deterministically pick an execution direction
 evaluate :: Program -> [Context] -> (EvalStatus, [Context])
-evaluate prog entity = case match prog entity of
-    []                    -> (EvalUndefined, entity)
-    [(m,_,StratHalt _),_] -> evaluate' prog m entity
-    [_,(n,_,StratHalt _)] -> evaluate' prog n entity
-    xs | all sh xs        -> (EvalOk,        entity)
-    _                     -> (EvalAmbiguous, entity)
-  where sh (_,_,StratHalt _) = True
-        sh _                 = False
+evaluate prog entity =
+  case partition haltp (match prog entity) of
+    (_:_,[_]) -> evaluate' prog (-1) entity
+    (_:_,[])  -> (EvalOk,            entity)
+    (_:_,_)   -> (EvalAmbiguous,     entity)
+    ([],[])   -> (EvalUndefined,     entity)
+    ([],_)    -> (EvalMalformed,     entity)
+
+haltp (_,_,StratHalt _) = True
+haltp _                 = False
 
 -- evaluate' takes a previous strategy (Int) and continues in the same direction
 evaluate' :: Program -> Int -> [Context] -> (EvalStatus, [Context])
-evaluate' prog prev entity = case match prog entity of
-    [(m,_,StratHalt _)]   | m == prev               -> (EvalOk,        entity)
-    [(m,m',s1),(n,n',s2)] | m' == prev              -> go n s2
-                          | n' == prev              -> go m s1
-    [(n,n',s)]            | n' /= prev              -> go n s
-        -- ^ the entity may no longer match the previous strategy
-        --   if a parenthetical term has transitioned away
-    xs                    | any successor xs        -> (EvalAmbiguous, entity)
-    []                                              -> (EvalStuck,     entity)
-    _                                               -> (EvalCorrupt,   entity)
+evaluate' prog prev entity =
+  case partition haltp (match prog entity) of
+    (_:_,[]) -> (EvalOk,entity)
+    (_,[(m,m',s)]) | m' == prev -> (EvalOk,entity)
+                   | otherwise  -> go m s
+    ([],[(m,m',s1),(n,n',s2)]) | m' == prev -> go n s2
+                               | n' == prev -> go m s1
+    (xs,ys) | any successor (xs ++ ys) -> (EvalAmbiguous, entity)
+    ([],[]) -> (EvalStuck,entity)
+    _ -> (EvalCorrupt, entity)
   where
     go _ (StratHalt _) = (EvalOk, entity)
     go n s = case eval prog s entity of
