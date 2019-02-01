@@ -27,9 +27,9 @@ compile0 :: [FilePath] -> IO (Either CompilationError Program)
 compile0 = compWith []
 
 compile' :: [Definition] -> Either CompilationError Program
-compile' ds = fmap Program $ cVar ds >> cAmbi ds >> tgSolves (ds)
+compile' ds = fmap Program $ cVar ds >> cCtxt ds >> cAmbi ds >> tgSolves (ds)
 
--- phase 1: variable conflict checks
+-- phase 1: variable conflict and context scope checks
 
 cVar :: [Definition] -> Either CompilationError ()
 cVar = handle . filter checkDef
@@ -40,6 +40,18 @@ cVar = handle . filter checkDef
     checkDef = any checkCtxt . poolCtxts
     handle [] = Right ()
     handle ds = Left $ VarConflictError ds
+
+cCtxt :: [Definition] -> Either CompilationError ()
+cCtxt = handle . filter (not . checkDef)
+  where
+    checkDef (Terminus _)     = True
+    checkDef (Rule [l] [r] d) = all checkCtxt $ l : r : map _decRule d
+    checkDef _                = False
+    checkCtxt (Context (Var _) _) = True
+    checkCtxt _                   = False
+    handle [] = Right ()
+    handle ds = Left $ NonlocalContextError ds
+
 
 -- phase 2: ambiguity checks
 -- pug = pattern unifying graph
