@@ -68,8 +68,7 @@ cAmbi ds = handle . map resolve $ runST $ pugBuild ctxts >>= pugAmbiguities
 getContexts :: [Definition] -> [(Int,Context)]
 getContexts = concat . zipWith f [0..]
   where f n (Rule lhs rhs _) = map (n,) $ lhs ++ rhs
-        f _ _ = []
-        -- f n (Terminus t)     = [(n,Context (Var "") t)]
+        f _ (Terminus _) = []
 
 pugBuild :: Vector (Int, Context) -> ST s (A.STArray s (Int,Int) Bool)
 pugBuild ctxts =
