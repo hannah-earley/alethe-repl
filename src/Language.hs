@@ -20,7 +20,7 @@ data Term = Atom     Integer String
           | Var      String
           | Asymm    Term Term
           | Compound [Term]
-          deriving (Eq)
+          deriving (Eq,Ord)
 
 data Definition = Terminus [Term]
                 | Rule { _defLPatt :: [Context]
@@ -167,21 +167,14 @@ class Kappa a where
     unify' :: a -> a -> Maybe (Map String Term)
     unify' = unify (const True)
 
+    -- sub only replaces variables which have a replacement,
+    -- otherwise those vars are left intact; subAll insists
+    -- on replacing *every* variable, and return Nothing otherwise.
+    -- replacements are removed from the map as we go
     sub :: Map String Term -> a -> (Map String Term, a)
+    subAll :: Map String Term -> a -> Maybe (Map String Term, a)
 
     compatible :: a -> a -> Bool
-
-subMakeover :: Kappa a => Map String Term -> a -> Maybe (Map String Term, a)
-subMakeover m x = let (m',x') = sub m x in
-                  if S.null $ vars x `S.intersection` vars x'
-                     then Just (m',x')
-                     else Nothing
-
-subAll :: Kappa a => Map String Term -> a -> Maybe (Map String Term, a)
-subAll m x = let (m',x') = sub m x in
-             if S.null $ vars x'
-                then Just (m',x')
-                else Nothing
 
 varsplit :: Kappa a => a -> (Set String, a, a)
 varsplit t = let (l,r) = asplit t in (vars t, l, r)
@@ -201,9 +194,14 @@ instance Kappa a => Kappa [a] where
       where go m (patt,term) = unify p patt term >>= mapMergeDisjoint m
 
     sub m []     = (m,[])
-    sub m (x:xs) = let (m',x') = sub m x
+    sub m (x:xs) = let (m',x')   = sub m x
                        (m'',xs') = sub m' xs
                    in (m'',x':xs')
+
+    subAll m [] = Just (m,[])
+    subAll m (x:xs) = do (m',x')   <- subAll m x
+                         (m'',xs') <- subAll m' xs
+                         return (m'', x':xs')
 
     compatible xs ys = maybe False (all $ uncurry compatible) $ zipStrict xs ys
 
@@ -234,6 +232,11 @@ instance Kappa Term where
                          in (m1 `M.union` m2, Asymm l' r')
     sub m (Compound t) = Compound <$> sub m t
 
+    subAll m a@(Atom _ _) = Just (m,a)
+    subAll m (Var v)      = (M.delete v m,) <$> m M.!? v
+    subAll _ (Asymm _ _)  = Nothing -- asymm's have no right being here!
+    subAll m (Compound t) = fmap Compound <$> subAll m t
+
     compatible (Var _)      _             = True
     compatible _            (Var _)       = True
     compatible a@(Atom _ _) b@(Atom _ _)  = a == b
@@ -256,6 +259,10 @@ instance Kappa Context where
                               (m'',p') = sub m' p
                           in (m'', Context c' p')
 
+    subAll m (Context c p) = do (m',c') <- subAll m c
+                                (m'',p') <- subAll m' p
+                                return (m'', Context c' p')
+
     compatible (Context c1 p1) (Context c2 p2) = compatible c1 c2 && compatible p1 p2
 
 -- compilation
@@ -272,6 +279,7 @@ data CompilationError = ParseError PE.ParseError
                 | AmbiguityError [Definition]
                 | ReversibilityError [Definition]
                 | VarConflictError [Definition]
+                | NonlocalContextError [Definition]
 
 instance Show Strategy where
     show (StratHalt t) = show (Terminus t)
@@ -292,6 +300,7 @@ instance Show CompilationError where
     show (AmbiguityError d) = "Non-determinism detected between the following rules!:" ++ showErrDefs d
     show (ReversibilityError d) = "Couldn't find a reversible execution plan for the following!:" ++ showErrDefs d
     show (VarConflictError d) = "Conflicting variables in the following!:" ++ showErrDefs d
+    show (NonlocalContextError d) = "Non-local contexts and multiparty definitions are unsupported!:" ++ showErrDefs d
 
 stripChildren :: Definition -> Definition
 stripChildren (Terminus t) = Terminus (t)
@@ -309,6 +318,12 @@ data EvalStatus = EvalOk
                 | EvalMalformed
                 | EvalCorrupt
                 deriving (Eq,Ord,Show)
+
+combineEvals :: [(EvalStatus, a)] -> (EvalStatus, [a])
+combineEvals = first maximum . unzip
+
+evalMap :: (a -> b) -> (EvalStatus, a) -> (EvalStatus, b)
+evalMap f (e, x) = (e, f x)
 
 match :: Program -> [Context] -> [(Int,Strategy)]
 match (Program [])     _ = []
@@ -342,26 +357,42 @@ evaluate prog entity = case match prog entity of
 evaluate' :: Program -> Int -> [Context] -> (EvalStatus, [Context])
 evaluate' prog prev entity = case match prog entity of
     [(m,StratHalt _)] | m == prev               -> (EvalOk,        entity)
-    [(m,s1),(n,s2)]   | m == prev               -> evaluate'' prog (n,s2) entity
-                      | n == prev               -> evaluate'' prog (m,s1) entity
-    [(n,s)]           | n /= prev               -> evaluate'' prog (n,s)  entity
+    [(m,s1),(n,s2)]   | m == prev               -> go n s2
+                      | n == prev               -> go m s1
+    [(n,s)]           | n /= prev               -> go n s
         -- ^ the entity may no longer match the previous strategy
         --   if a parenthetical term has transitioned away
     xs                | any ((==prev) . fst) xs -> (EvalAmbiguous, entity)
     []                                          -> (EvalStuck,     entity)
     _                                           -> (EvalCorrupt,   entity)
+  where
+    go n s = maybe (EvalStuck, entity) (evaluate' prog n) $ eval prog s entity
 
-evaluate'' :: Program -> (Int,Strategy) -> [Context] -> (EvalStatus, [Context])
-evaluate'' = undefined
+eval :: Program -> Strategy -> [Context] -> Maybe [Context]
+eval _    (StratHalt _)                 lent = Just lent
+eval prog (Strategy lhs rules plan rhs) lent =
+  do
+    lvars        <- unify isp lhs lent
+    rvars        <- foldM execute lvars plan'
+    (vars0,rent) <- subAll rvars rhs
+    guard $ M.null vars0
+    return rent
+  where
+    isp = isHalting prog
+    goPlan ridx = let (Context (Var v) patt) = rules ! ridx in (v, patt)
+    plan' = map (either2 goPlan) plan
+    evalPL = Compound . evaluatePartialLocal prog
+
+    execute mvars (False, (v, patt)) =
+        do (mvars',ent) <- subAll mvars patt
+           return $ M.insert v (evalPL ent) mvars'
+    execute mvars (True,  (v, patt)) =
+        mvars M.!? v >>= \case
+            Compound ent -> unify isp patt ent
+            _            -> Nothing
 
 evaluatePartial :: Program -> [Context] -> [Context]
 evaluatePartial prog = snd . evaluate prog
-
-combineEvals :: [(EvalStatus, a)] -> (EvalStatus, [a])
-combineEvals = first maximum . unzip
-
-evalMap :: (a -> b) -> (EvalStatus, a) -> (EvalStatus, b)
-evalMap f (e, x) = (e, f x)
 
 evaluateRec :: Program -> [Context] -> (EvalStatus, [Context])
 evaluateRec prog = combineEvals . map goc
@@ -379,7 +410,10 @@ evaluateRec prog = combineEvals . map goc
 
 evaluateLocal :: Program -> [Term] -> (EvalStatus, [Term])
 evaluateLocal prog ts =
-    let c = phony "local" in
+    let c = phony "<|local|>" in
     case evaluate prog [Context c ts] of
         (e, [Context c' ts']) | c == c' -> (e,           ts')
         _                               -> (EvalCorrupt, ts)
+
+evaluatePartialLocal :: Program -> [Term] -> [Term]
+evaluatePartialLocal prog = snd . evaluateLocal prog

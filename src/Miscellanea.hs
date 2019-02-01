@@ -114,3 +114,7 @@ split [] = ([],[])
 mapMergeDisjoint :: Ord k => Map k v -> Map k v -> Maybe (Map k v)
 mapMergeDisjoint m n = M.foldrWithKey go (Just m) n
   where go k v = (liftM2 (>>) (guard . not . M.member k) (return . M.insert k v) =<<)
+
+either2 :: (a -> b) -> Either a a -> (Bool, b)
+either2 f (Left  x) = (False, f x)
+either2 f (Right x) = (True,  f x)

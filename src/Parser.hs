@@ -219,7 +219,7 @@ datum' t = halts ++ [mkDef . concat $ zipWith go ps vs]
                  , Declaration 1 (Context p [termTerm, v's M.! v, opv]) ]
           where opv = Compound [atomDup, Var v]
         t' = term1 t
-        Just (_, t'') = subMakeover v's t'
+        Just (_, t'') = subAll v's t'
         halts = Terminus <$> [t, [atomDup, t'], [opt, termTerm], [termTerm, p1, opt]]
         opt = Compound [atomDup, t']
         mkDef = Rule [Context p0 [opt, termTerm]] [Context p0 [termTerm, t'', opt]]
