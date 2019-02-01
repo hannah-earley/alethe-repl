@@ -8,11 +8,11 @@ import Data.Vector (Vector,(!))
 import Data.Char
 import Data.Maybe (catMaybes)
 import Data.List (intercalate)
-import Control.Monad (liftM2)
+import Control.Monad (liftM2, foldM, guard)
 import Control.Arrow (first)
 import qualified Text.Parsec.Error as PE
 
-import Helper
+import Miscellanea
 
 -- main interface
 
@@ -160,12 +160,16 @@ class Kappa a where
     vars :: a -> Set String
     vars = M.keysSet . vars'
 
+    -- unify takes an extra argument that indicates whether a given subterm
+    -- (that is explicitly pattern matched on) is in a legal state; this is
+    -- mainly used to check whether each deconstructed term is in a halting state
     unify :: ([Term] -> Bool) -> a -> a -> Maybe (Map String Term)
-    unify = undefined
-
-    compatible :: a -> a -> Bool
+    unify' :: a -> a -> Maybe (Map String Term)
+    unify' = unify (const True)
 
     sub :: Map String Term -> a -> (Map String Term, a)
+
+    compatible :: a -> a -> Bool
 
 subMakeover :: Kappa a => Map String Term -> a -> Maybe (Map String Term, a)
 subMakeover m x = let (m',x') = sub m x in
@@ -187,20 +191,21 @@ zipStrict []     []     = Just []
 zipStrict (x:xs) (y:ys) = (:) (x,y) <$> zipStrict xs ys
 zipStrict _      _      = Nothing
 
-zipWithStrict :: (a -> b -> c) -> [a] -> [b] -> Maybe [c]
-zipWithStrict f xs ys = map (uncurry f) <$> zipStrict xs ys
-
 instance Kappa a => Kappa [a] where
     asplit = unzip . map asplit
+
     vars' = M.unionsWith (+) . map vars'
     vars = S.unions . map vars
-    -- unify xs ys = M.unionsWith (++) <$> (zipWithStrict unify xs ys >>= sequence)
-    compatible xs ys = maybe False (all $ uncurry compatible) $ zipStrict xs ys
+
+    unify p patts terms = zipStrict patts terms >>= foldM go M.empty
+      where go m (patt,term) = unify p patt term >>= mapMergeDisjoint m
 
     sub m []     = (m,[])
     sub m (x:xs) = let (m',x') = sub m x
                        (m'',xs') = sub m' xs
                    in (m'',x':xs')
+
+    compatible xs ys = maybe False (all $ uncurry compatible) $ zipStrict xs ys
 
 instance Kappa Term where
     asplit = liftM2 (,) termLeft termRight
@@ -215,10 +220,19 @@ instance Kappa Term where
     vars (Asymm l r) = S.union (vars l) (vars r)
     vars (Compound t)= vars t
 
-    -- unify a@(Atom _ _) b@(Atom _ _) = if a == b then Just M.empty else Nothing
-    -- unify (Var v)      t            = Just (M.singleton v [t])
-    -- unify (Compound s) (Compound t) = unify s t
-    -- unify _            _            = Nothing
+    unify _ a@(Atom _ _) b@(Atom _ _) = guard (a == b) $> M.empty
+    unify _ (Var v)      t            = return $ M.singleton v t
+    unify p (Compound s) (Compound t) = guard (p t) >> unify p s t
+    unify _ _            _            = Nothing
+
+    sub m a@(Atom _ _) = (m,a)
+    sub m (Var v)      = case m M.!? v of
+                           Just x  -> (M.delete v m, x)
+                           Nothing -> (m, Var v)
+    sub m (Asymm l r)  = let (m1,l') = sub m l
+                             (m2,r') = sub m r
+                         in (m1 `M.union` m2, Asymm l' r')
+    sub m (Compound t) = Compound <$> sub m t
 
     compatible (Var _)      _             = True
     compatible _            (Var _)       = True
@@ -228,15 +242,6 @@ instance Kappa Term where
     compatible (Compound s) (Compound t)  = compatible s t
     compatible _            _             = False
 
-    sub m a@(Atom _ _) = (m,a)
-    sub m (Var v) = case m M.!? v of
-                      Just x  -> (M.delete v m, x)
-                      Nothing -> (m, Var v)
-    sub m (Asymm l r) = let (m1,l') = sub m l
-                            (m2,r') = sub m r
-                        in (m1 `M.union` m2, Asymm l' r')
-    sub m (Compound t) = Compound <$> sub m t
-
 instance Kappa Context where
     asplit (Context c p) = let (c1,c2) = asplit c
                                (p1,p2) = asplit p
@@ -245,12 +250,13 @@ instance Kappa Context where
     vars' (Context c p)= M.unionWith (+) (vars' c) (vars' p)
     vars (Context c p) = S.union (vars c) (vars p)
 
-    -- unify (Context c1 p1) (Context c2 p2) = liftM2 (M.union) (unify p1 p2) (unify c1 c2)
-    compatible (Context c1 p1) (Context c2 p2) = compatible c1 c2 && compatible p1 p2
+    unify p (Context c1 p1) (Context c2 p2) = unify p (c1:p1) (c2:p2)
 
     sub m (Context c p) = let (m',c') = sub m c
                               (m'',p') = sub m' p
                           in (m'', Context c' p')
+
+    compatible (Context c1 p1) (Context c2 p2) = compatible c1 c2 && compatible p1 p2
 
 -- compilation
 
