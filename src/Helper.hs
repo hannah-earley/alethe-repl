@@ -25,3 +25,8 @@ showSemi = showMany "; "
 list1 :: (a -> b) -> ([a] -> b) -> [a] -> b
 list1 f _ [x] = f x
 list1 _ g xs  = g xs
+
+split :: [a] -> ([a],[a])
+split (x:y:zs) = let ~(xs,ys) = split zs in (x:xs,y:ys)
+split [x] = ([x],[])
+split [] = ([],[])

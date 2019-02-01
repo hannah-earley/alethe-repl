@@ -155,12 +155,32 @@ termRight x = x
 
 class Kappa a where
     asplit :: a -> (a,a)
+
+    vars' :: a -> Map String Int
     vars :: a -> Set String
-    unify :: a -> a -> Maybe (Map String [Term])
+    vars = M.keysSet . vars'
+
+    unify :: ([Term] -> Bool) -> a -> a -> Maybe (Map String Term)
+    unify = undefined
+
     compatible :: a -> a -> Bool
 
-    varsplit :: a -> (Set String, a, a)
-    varsplit t = let (l,r) = asplit t in (vars t, l, r)
+    sub :: Map String Term -> a -> (Map String Term, a)
+
+subMakeover :: Kappa a => Map String Term -> a -> Maybe (Map String Term, a)
+subMakeover m x = let (m',x') = sub m x in
+                  if S.null $ vars x `S.intersection` vars x'
+                     then Just (m',x')
+                     else Nothing
+
+subAll :: Kappa a => Map String Term -> a -> Maybe (Map String Term, a)
+subAll m x = let (m',x') = sub m x in
+             if S.null $ vars x'
+                then Just (m',x')
+                else Nothing
+
+varsplit :: Kappa a => a -> (Set String, a, a)
+varsplit t = let (l,r) = asplit t in (vars t, l, r)
 
 zipStrict :: [a] -> [b] -> Maybe [(a,b)]
 zipStrict []     []     = Just []
@@ -172,22 +192,33 @@ zipWithStrict f xs ys = map (uncurry f) <$> zipStrict xs ys
 
 instance Kappa a => Kappa [a] where
     asplit = unzip . map asplit
+    vars' = M.unionsWith (+) . map vars'
     vars = S.unions . map vars
-    unify xs ys = M.unionsWith (++) <$> (zipWithStrict unify xs ys >>= sequence)
+    -- unify xs ys = M.unionsWith (++) <$> (zipWithStrict unify xs ys >>= sequence)
     compatible xs ys = maybe False (all $ uncurry compatible) $ zipStrict xs ys
+
+    sub m []     = (m,[])
+    sub m (x:xs) = let (m',x') = sub m x
+                       (m'',xs') = sub m' xs
+                   in (m'',x':xs')
 
 instance Kappa Term where
     asplit = liftM2 (,) termLeft termRight
+
+    vars' (Atom _ _)  = M.empty
+    vars' (Var v)     = M.singleton v 1
+    vars' (Asymm l r) = M.unionWith  max (vars' l) (vars' r)
+    vars' (Compound t)= vars' t
 
     vars (Atom _ _)  = S.empty
     vars (Var v)     = S.singleton v
     vars (Asymm l r) = S.union (vars l) (vars r)
     vars (Compound t)= vars t
 
-    unify a@(Atom _ _) b@(Atom _ _) = if a == b then Just M.empty else Nothing
-    unify (Var v)      t            = Just (M.singleton v [t])
-    unify (Compound s) (Compound t) = unify s t
-    unify _            _            = Nothing
+    -- unify a@(Atom _ _) b@(Atom _ _) = if a == b then Just M.empty else Nothing
+    -- unify (Var v)      t            = Just (M.singleton v [t])
+    -- unify (Compound s) (Compound t) = unify s t
+    -- unify _            _            = Nothing
 
     compatible (Var _)      _             = True
     compatible _            (Var _)       = True
@@ -197,14 +228,29 @@ instance Kappa Term where
     compatible (Compound s) (Compound t)  = compatible s t
     compatible _            _             = False
 
+    sub m a@(Atom _ _) = (m,a)
+    sub m (Var v) = case m M.!? v of
+                      Just x  -> (M.delete v m, x)
+                      Nothing -> (m, Var v)
+    sub m (Asymm l r) = let (m1,l') = sub m l
+                            (m2,r') = sub m r
+                        in (m1 `M.union` m2, Asymm l' r')
+    sub m (Compound t) = Compound <$> sub m t
+
 instance Kappa Context where
     asplit (Context c p) = let (c1,c2) = asplit c
                                (p1,p2) = asplit p
                            in (Context c1 p1, Context c2 p2)
 
+    vars' (Context c p)= M.unionWith (+) (vars' c) (vars' p)
     vars (Context c p) = S.union (vars c) (vars p)
-    unify (Context c1 p1) (Context c2 p2) = liftM2 (M.union) (unify p1 p2) (unify c1 c2)
+
+    -- unify (Context c1 p1) (Context c2 p2) = liftM2 (M.union) (unify p1 p2) (unify c1 c2)
     compatible (Context c1 p1) (Context c2 p2) = compatible c1 c2 && compatible p1 p2
+
+    sub m (Context c p) = let (m',c') = sub m c
+                              (m'',p') = sub m' p
+                          in (m'', Context c' p')
 
 -- compilation
 
@@ -216,9 +262,10 @@ data Strategy = StratHalt [Term]
                          , _stPlan  :: [Either Int Int]
                          , _stRPatt :: [Context] }
 
-data KappaError = ParseError PE.ParseError
+data CompilationError = ParseError PE.ParseError
                 | AmbiguityError [Definition]
                 | ReversibilityError [Definition]
+                | VarConflictError [Definition]
 
 instance Show Strategy where
     show (StratHalt t) = show (Terminus t)
@@ -234,10 +281,11 @@ showStratHead l r =
 instance Show Program where
     show (Program xs) = showMany "\n" xs
 
-instance Show KappaError where
+instance Show CompilationError where
     show (ParseError e) = "Parse error!: " ++ show e
     show (AmbiguityError d) = "Non-determinism detected between the following rules!:" ++ showErrDefs d
     show (ReversibilityError d) = "Couldn't find a reversible execution plan for the following!:" ++ showErrDefs d
+    show (VarConflictError d) = "Conflicting variables in the following!:" ++ showErrDefs d
 
 stripChildren :: Definition -> Definition
 stripChildren (Terminus t) = Terminus (t)
@@ -257,7 +305,7 @@ data EvalStatus = EvalOk
                 deriving (Eq,Ord,Show)
 
 match :: Program -> [Context] -> [(Int,Strategy)]
-match (Program []) _ = []
+match (Program [])     _ = []
 match (Program (x:xs)) c =
     let rest = map (first succ) $ match (Program xs) c
     in case x of
@@ -265,8 +313,11 @@ match (Program (x:xs)) c =
         Strategy  p _ _ _ | compatible  p  c              -> (0,x) : rest
         _                                                 ->         rest
 
-eval :: Strategy -> [Context] -> Either EvalStatus [Context]
-eval = undefined
+isHalting :: Program -> [Term] -> Bool
+isHalting (Program []) _       = False
+isHalting (Program (StratHalt x : _)) c
+    | compatible x c           = True
+isHalting (Program (_ : xs)) c = isHalting (Program xs) c
 
 -- the status output indicates whether or not the computation successfully completed
 -- evaluate requires its input to be in a halting state (i.e. an initial
@@ -276,8 +327,8 @@ evaluate prog entity = case match prog entity of
     []                  -> (EvalUndefined, entity)
     [(m,StratHalt _),_] -> evaluate' prog m entity
     [_,(n,StratHalt _)] -> evaluate' prog n entity
-    xs | all sh xs      -> (EvalOk, entity)
-    _                   -> (EvalCorrupt, entity)
+    xs | all sh xs      -> (EvalOk,        entity)
+    _                   -> (EvalAmbiguous, entity)
   where sh (_, StratHalt _) = True
         sh _                = False
 
@@ -285,14 +336,20 @@ evaluate prog entity = case match prog entity of
 evaluate' :: Program -> Int -> [Context] -> (EvalStatus, [Context])
 evaluate' prog prev entity = case match prog entity of
     [(m,StratHalt _)] | m == prev               -> (EvalOk,        entity)
-    [(m,s1),(n,s2)]   | m == prev               -> go n s2
-                      | n == prev               -> go m s1
+    [(m,s1),(n,s2)]   | m == prev               -> evaluate'' prog (n,s2) entity
+                      | n == prev               -> evaluate'' prog (m,s1) entity
+    [(n,s)]           | n /= prev               -> evaluate'' prog (n,s)  entity
+        -- ^ the entity may no longer match the previous strategy
+        --   if a parenthetical term has transitioned away
     xs                | any ((==prev) . fst) xs -> (EvalAmbiguous, entity)
+    []                                          -> (EvalStuck,     entity)
     _                                           -> (EvalCorrupt,   entity)
-  where go next strat = case eval strat entity of
-                          Right entity' -> evaluate' prog next entity'
-                          Left EvalOk   -> (EvalCorrupt, entity)
-                          Left e        -> (e,           entity)
+
+evaluate'' :: Program -> (Int,Strategy) -> [Context] -> (EvalStatus, [Context])
+evaluate'' = undefined
+
+evaluatePartial :: Program -> [Context] -> [Context]
+evaluatePartial prog = snd . evaluate prog
 
 combineEvals :: [(EvalStatus, a)] -> (EvalStatus, [a])
 combineEvals = first maximum . unzip
