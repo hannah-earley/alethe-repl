@@ -1,3 +1,5 @@
+{-# LANGUAGE QuasiQuotes #-}
+
 module Language where
 
 import Data.Set (Set)
@@ -11,8 +13,25 @@ import Data.List (intercalate,partition)
 import Control.Monad (liftM2, foldM, guard)
 import Control.Arrow (first)
 import qualified Text.Parsec.Error as PE
+import qualified Text.RawString.QQ as QQ
 
 import Miscellanea
+
+-- prelude
+
+prelude' :: String
+prelude' = [QQ.r|
+
+    !;
+    data ();
+    data Z;
+    data S x;
+    data Nil;
+    data Cons car cdr;
+    data Plus;
+    data Minus;
+
+|]
 
 -- main interface
 
@@ -166,13 +185,17 @@ class Kappa a where
     unify :: ([Term] -> Bool) -> a -> a -> Maybe (Map String Term)
     unify' :: a -> a -> Maybe (Map String Term)
     unify' = unify (const True)
+    unifyDup :: ([Term] -> Bool) -> a -> a -> Maybe (Map String Term)
 
     -- sub only replaces variables which have a replacement,
     -- otherwise those vars are left intact; subAll insists
     -- on replacing *every* variable, and return Nothing otherwise.
-    -- replacements are removed from the map as we go
+    -- replacements are removed from the map as we go;
+    -- both sub and subAll only allow each variable to be replaced
+    -- once, but subAllDup allows for multiple occurences
     sub :: Map String Term -> a -> (Map String Term, a)
     subAll :: Map String Term -> a -> Maybe (Map String Term, a)
+    subAllDup :: Map String Term -> a -> Maybe a
 
     compatible :: a -> a -> Bool
 
@@ -193,6 +216,9 @@ instance (Show a, Kappa a) => Kappa [a] where
     unify p patts terms = zipStrict patts terms >>= foldM go M.empty
       where go m (patt,term) = unify p patt term >>= mapMergeDisjoint m
 
+    unifyDup p patts terms = zipStrict patts terms >>= foldM go M.empty
+      where go m (patt,term) = unify p patt term >>= mapMergeEq m
+
     sub m []     = (m,[])
     sub m (x:xs) = let (m',x')   = sub m x
                        (m'',xs') = sub m' xs
@@ -202,6 +228,8 @@ instance (Show a, Kappa a) => Kappa [a] where
     subAll m (x:xs) = do (m',x')   <- subAll m x
                          (m'',xs') <- subAll m' xs
                          return (m'', x':xs')
+
+    subAllDup = mapM . subAllDup
 
     compatible xs ys = maybe False (all $ uncurry compatible) $ zipStrict xs ys
 
@@ -223,6 +251,11 @@ instance Kappa Term where
     unify p (Compound s) (Compound t) = guard (p t) >> unify p s t
     unify _ _            _            = Nothing
 
+    unifyDup _ a@(Atom _ _) b@(Atom _ _) = guard (a == b) $> M.empty
+    unifyDup _ (Var v)      t            = return $ M.singleton v t
+    unifyDup p (Compound s) (Compound t) = guard (p t) >> unifyDup p s t
+    unifyDup _ _            _            = Nothing
+
     sub m a@(Atom _ _) = (m,a)
     sub m (Var v)      = case m M.!? v of
                            Just x  -> (M.delete v m, x)
@@ -236,6 +269,11 @@ instance Kappa Term where
     subAll m (Var v)      = (M.delete v m,) <$> m M.!? v
     subAll _ (Asymm _ _)  = Nothing -- asymm's have no right being here!
     subAll m (Compound t) = fmap Compound <$> subAll m t
+
+    subAllDup _ a@(Atom _ _) = return a
+    subAllDup m (Var v)      = m M.!? v
+    subAllDup _ (Asymm _ _)  = Nothing
+    subAllDup m (Compound t) = Compound <$> subAllDup m t
 
     compatible (Var _)      _             = True
     compatible _            (Var _)       = True
@@ -253,7 +291,8 @@ instance Kappa Context where
     vars' (Context c p)= M.unionWith (+) (vars' c) (vars' p)
     vars (Context c p) = S.union (vars c) (vars p)
 
-    unify p (Context c1 p1)      (Context c2 p2) = unify p (c1:p1) (c2:p2)
+    unify p (Context c1 p1) (Context c2 p2) = unify p (c1:p1) (c2:p2)
+    unifyDup p (Context c1 p1) (Context c2 p2) = unifyDup p (c1:p1) (c2:p2)
 
     sub m (Context c p) = let (m',c') = sub m c
                               (m'',p') = sub m' p
@@ -264,6 +303,8 @@ instance Kappa Context where
     subAll m (Context c p)         = do (m',c') <- subAll m c
                                         (m'',p') <- subAll m' p
                                         return (m'', Context c' p')
+
+    subAllDup m (Context c p) = liftM2 Context (subAllDup m c) (subAllDup m p)
 
     compatible (Context c1 p1) (Context c2 p2) = compatible c1 c2 && compatible p1 p2
 
@@ -363,14 +404,15 @@ haltp _                 = False
 evaluate' :: Program -> Int -> [Context] -> (EvalStatus, [Context])
 evaluate' prog prev entity =
   case partition haltp (match prog entity) of
-    (_:_,[]) -> (EvalOk,entity)
-    (_,[(m,m',s)]) | m' == prev -> (EvalOk,entity)
-                   | otherwise  -> go m s
+    (_:_,[])                                -> (EvalOk,        entity)
+    (_,[(m,m',s)])             | m' == prev -> (EvalOk,        entity)
+                               | otherwise  -> go m s
     ([],[(m,m',s1),(n,n',s2)]) | m' == prev -> go n s2
                                | n' == prev -> go m s1
-    (xs,ys) | any successor (xs ++ ys) -> (EvalAmbiguous, entity)
-    ([],[]) -> (EvalStuck,entity)
-    _ -> (EvalCorrupt, entity)
+    (xs,ys)                    | any successor (xs ++ ys)
+                                            -> (EvalAmbiguous, entity)
+    ([],[])                                 -> (EvalStuck,     entity)
+    _                                       -> (EvalCorrupt,   entity)
   where
     go _ (StratHalt _) = (EvalOk, entity)
     go n s = case eval prog s entity of
