@@ -1,10 +1,13 @@
 module Miscellanea where
 
+import Control.Monad (liftM2,guard)
+import Control.Applicative ((<$))
+import System.FilePath.Posix (normalise, (</>))
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as M
 import Data.Heap (Entry(..))
 import qualified Data.Heap as H
-import Data.List (nub)
+import Data.List (nub,intercalate)
 import Data.Either (partitionEithers)
 
 data Extended a = NegInfinite | Finite a | PosInfinite
@@ -81,3 +84,33 @@ combineEithers = go . partitionEithers
 mapLeft :: (a -> b) -> Either a c -> Either b c
 mapLeft f (Left x)  = Left (f x)
 mapLeft _ (Right y) = Right y
+
+($>) :: Functor f => f a -> b -> f b
+($>) = flip (<$)
+infixr 4 $>
+
+(<//>) :: FilePath -> FilePath -> FilePath
+path1 <//> path2 = normalise $ path1 </> path2
+infixr 5 <//>
+
+(|||) :: Monad m => m Bool -> m Bool -> m Bool
+(|||) = liftM2 (||)
+infixr 2 |||
+
+showMany :: Show a => String -> [a] -> String
+showMany sep = intercalate sep . map show
+showSp = showMany " "
+showSemi = showMany "; "
+
+list1 :: (a -> b) -> ([a] -> b) -> [a] -> b
+list1 f _ [x] = f x
+list1 _ g xs  = g xs
+
+split :: [a] -> ([a],[a])
+split (x:y:zs) = let ~(xs,ys) = split zs in (x:xs,y:ys)
+split [x] = ([x],[])
+split [] = ([],[])
+
+mapMergeDisjoint :: Ord k => Map k v -> Map k v -> Maybe (Map k v)
+mapMergeDisjoint m n = M.foldrWithKey go (Just m) n
+  where go k v = (liftM2 (>>) (guard . not . M.member k) (return . M.insert k v) =<<)

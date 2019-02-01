@@ -29,7 +29,6 @@ import System.Directory (withCurrentDirectory)
 import System.FilePath.Posix (takeDirectory)
 
 import Language
-import Helper
 import Miscellanea
 
 -- lexing and tokens
