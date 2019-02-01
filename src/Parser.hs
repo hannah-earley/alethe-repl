@@ -18,6 +18,7 @@ import Control.Monad.Trans (liftIO)
 import Control.Exception (bracket)
 import Data.Set (Set)
 import qualified Data.Set as S
+import qualified Data.Map.Strict as M
 
 import System.Posix.Files as F
 import System.Posix.Types (DeviceID, FileID, Fd)
@@ -211,15 +212,18 @@ imprt = reserved "import" >> stringLiteral >>= subParse
 
 datum :: Monad m => Parser m [Definition]
 datum = reserved "data" >> datum' <$> (terms <* semi)
-datum' t = halts ++ [mkDef . concat $ zipWith go ps (S.toList $ vars t)]
-  where (p0:p1:ps) = phantoms
+datum' t = halts ++ [mkDef . concat $ zipWith go ps vs]
+  where (p0:p1:ps,qs) = split phantoms
+        vs = S.toList $ vars t
+        v's = M.fromList $ zip vs qs
         go p v = [ Declaration 1 (Context p [opv, termTerm])
-                 , Declaration 1 (Context p [termTerm, Var v, opv]) ]
+                 , Declaration 1 (Context p [termTerm, v's M.! v, opv]) ]
           where opv = Compound [atomDup, Var v]
         t' = term1 t
+        Just (_, t'') = subMakeover v's t'
         halts = Terminus <$> [t, [atomDup, t'], [opt, termTerm], [termTerm, p1, opt]]
         opt = Compound [atomDup, t']
-        mkDef = Rule [Context p0 [opt, termTerm]] [Context p0 [termTerm, t', opt]]
+        mkDef = Rule [Context p0 [opt, termTerm]] [Context p0 [termTerm, t'', opt]]
 
 prog :: Parser IO [Definition]
 prog = concat <$> manyTill (imprt <|> datum <|> defn) eof
@@ -244,13 +248,13 @@ subParse path = getState >>= join . liftIO . attempt . withResource path . fetch
 
     fetch st rid handle
       | S.member rid seen = return $ return []
-      | otherwise           = hGetContents handle >>= (restore rel <$>) . sub
+      | otherwise         = hGetContents handle >>= (restore rel <$>) . go
       where
         seen = seenFiles st
         rel  = relPath st
         st'  = st { seenFiles = S.insert rid seen
                   , relPath = rel <//> dir }
-        sub  = cwd . runParserT (liftState prog) st' (rel <//> path)
+        go   = cwd . runParserT (liftState prog) st' (rel <//> path)
 
     restore _   (Left  e)        = bubble e
     restore rel (Right (x, st')) = putState st'' >> return x
@@ -274,17 +278,17 @@ ioMsg path e state = "[" ++ realPath ++ "] System error: " ++ explain
 parsePrograms :: [FilePath] -> Parser IO [Definition]
 parsePrograms = fmap concat . mapM subParse
 
-loadPrograms :: [FilePath] -> IO (Either KappaError [Definition])
+loadPrograms :: [FilePath] -> IO (Either CompilationError [Definition])
 loadPrograms paths = liftErr <$> runParserT (parsePrograms paths) emptyState "" ""
 
-liftErr :: Either ParseError a -> Either KappaError a
+liftErr :: Either ParseError a -> Either CompilationError a
 liftErr (Left e) = Left $ ParseError e
 liftErr (Right v)= Right v
 
 testParse :: String -> IO (Either ParseError [Definition])
 testParse = runParserT prog emptyState "<local>"
 
-readInput :: String -> Either KappaError [Declaration]
+readInput :: String -> Either CompilationError [Declaration]
 readInput = liftErr . runParser (rule <* eof) emptyState "<local>"
 
 prelude :: [Definition]

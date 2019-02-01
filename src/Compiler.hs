@@ -17,22 +17,34 @@ import qualified Data.Ix as I
 import Data.List (nub)
 import Data.Maybe (catMaybes)
 
-compWith :: [Definition] -> [FilePath] -> IO (Either KappaError Program)
+compWith :: [Definition] -> [FilePath] -> IO (Either CompilationError Program)
 compWith prel ps = loadPrograms ps >>= return . (compile' . (prel++) =<<)
 
-compile :: [FilePath] -> IO (Either KappaError Program)
+compile :: [FilePath] -> IO (Either CompilationError Program)
 compile = compWith prelude
 
-compile0 :: [FilePath] -> IO (Either KappaError Program)
+compile0 :: [FilePath] -> IO (Either CompilationError Program)
 compile0 = compWith []
 
-compile' :: [Definition] -> Either KappaError Program
-compile' ds = fmap Program $ cAmbi ds >> tgSolves (ds)
+compile' :: [Definition] -> Either CompilationError Program
+compile' ds = fmap Program $ cVar ds >> cAmbi ds >> tgSolves (ds)
 
--- phase 1: ambiguity checks
+-- phase 1: variable conflict checks
+
+cVar :: [Definition] -> Either CompilationError ()
+cVar = handle . filter checkDef
+  where
+    poolCtxts (Terminus _) = []
+    poolCtxts (Rule l r d) = l ++ r ++ map _decRule d
+    checkCtxt = any (>1) . M.elems . vars'
+    checkDef = any checkCtxt . poolCtxts
+    handle [] = Right ()
+    handle ds = Left $ VarConflictError ds
+
+-- phase 2: ambiguity checks
 -- pug = pattern unifying graph
 
-cAmbi :: [Definition] -> Either KappaError (Vector Definition, Vector (Int,Context))
+cAmbi :: [Definition] -> Either CompilationError (Vector Definition, Vector (Int,Context))
 cAmbi ds = handle . map resolve $ runST $ pugBuild ctxts >>= pugAmbiguities
   where
     defs = V.fromList ds
@@ -79,7 +91,7 @@ pugAmbiguities arr =
     w = A.writeArray arr
     w2 (i,j) v = w (i,j) v >> w (j,i) v
 
--- phase 2: resolving implementation paths
+-- phase 3: resolving implementation paths
 -- tg = transition graph
 
 tgBuild :: [Declaration] -> [Set String] -> [(Set String, [(Either Int Int, Int, Set String)])]
@@ -106,7 +118,7 @@ tgBuild rules = build S.empty . S.fromList
         next = S.unions (map (es2ns . snd) assocs) S.\\ visited
         assocs' = build (visited `S.union` from) next
 
-tgSolve :: Definition -> Either KappaError [Strategy]
+tgSolve :: Definition -> Either CompilationError [Strategy]
 tgSolve = mapLeft (ReversibilityError . pure) . tgSolve'
 
 tgSolve' :: Definition -> Either Definition [Strategy]
@@ -120,5 +132,5 @@ tgSolve' x@(Rule l r d) =
         vc = V.fromList . flip map d $ \(Declaration _ c) -> c
         mpl = dijkstra (M.fromList $ tgBuild d [nl,nr]) nl nr
 
-tgSolves :: [Definition] -> Either KappaError [Strategy]
+tgSolves :: [Definition] -> Either CompilationError [Strategy]
 tgSolves = mapLeft ReversibilityError . fmap concat . combineEithers . map tgSolve'
