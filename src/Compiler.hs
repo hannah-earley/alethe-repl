@@ -68,7 +68,8 @@ cAmbi ds = handle . map resolve $ runST $ pugBuild ctxts >>= pugAmbiguities
 getContexts :: [Definition] -> [(Int,Context)]
 getContexts = concat . zipWith f [0..]
   where f n (Rule lhs rhs _) = map (n,) $ lhs ++ rhs
-        f n (Terminus t)     = [(n,Context (Var "") t)]
+        f _ _ = []
+        -- f n (Terminus t)     = [(n,Context (Var "") t)]
 
 pugBuild :: Vector (Int, Context) -> ST s (A.STArray s (Int,Int) Bool)
 pugBuild ctxts =
@@ -130,19 +131,23 @@ tgBuild rules = build S.empty . S.fromList
         next = S.unions (map (es2ns . snd) assocs) S.\\ visited
         assocs' = build (visited `S.union` from) next
 
-tgSolve :: Definition -> Either CompilationError [Strategy]
-tgSolve = mapLeft (ReversibilityError . pure) . tgSolve'
-
-tgSolve' :: Definition -> Either Definition [Strategy]
-tgSolve'   (Terminus t) = let (l,r) = asplit t in Right $ StratHalt <$> nub [l,r]
-tgSolve' x@(Rule l r d) = 
-    do pl1 <- maybe (Left x) (Right . snd) mpl
-       let pl2 = reverse $ map flipEither pl1
-       return [Strategy l1 vc pl1 r1, Strategy l2 vc pl2 r2]
+tgSolve :: [l] -> Definition -> Maybe ([(l,l,Strategy)],[l])
+tgSolve (x:y:zs) (Terminus t) = case asplit t of
+    (l,r) | l == r    -> Just ([(x,x,StratHalt l)],(y:zs))
+          | otherwise -> Just ([(x,y,StratHalt l), (y,x,StratHalt r)],zs)
+tgSolve (x:y:zs) (Rule l r d) =
+  do (_,pl1) <- dijkstra (M.fromList $ tgBuild d [nl,nr]) nl nr
+     let pl2 = reverse $ map flipEither pl1
+     return ([(x,y,Strategy l1 vc pl1 r1), (y,x,Strategy l2 vc pl2 r2)], zs)
   where (nl,l1,r2) = varsplit l
         (nr,l2,r1) = varsplit r
-        vc = V.fromList . flip map d $ \(Declaration _ c) -> c
-        mpl = dijkstra (M.fromList $ tgBuild d [nl,nr]) nl nr
+        vc = V.fromList $ map _decRule d
+tgSolve _ _ = Nothing
 
-tgSolves :: [Definition] -> Either CompilationError [Strategy]
-tgSolves = mapLeft ReversibilityError . fmap concat . combineEithers . map tgSolve'
+tgSolves :: [Definition] -> Either CompilationError [(Int,Int,Strategy)]
+tgSolves = mapLeft ReversibilityError . fmap concat . combineEithers . go [0..]
+  where
+    go _ []      = []
+    go ns (d:ds) = case tgSolve ns d of
+                     Nothing        -> Left d   : go ns  ds
+                     Just (xs, ns') -> Right xs : go ns' ds

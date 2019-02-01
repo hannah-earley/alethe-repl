@@ -132,12 +132,14 @@ opScoped = liftM2 Atom sid idQual
 opScoped0= liftM2 Atom sid0 idQual
   where sid0= try $ char '@' >> scopeId 0
 
+opSub :: Monad m => Parser m Term
+opSub = opScoped <|> opNorm <?> "operator"
+opNorm = atom <$> operator
+
 oper :: Monad m => Parser m Term
 oper = opScoped <|> opComp <|> opNorm <?> "operator"
   where
-    opSub = opScoped <|> opNorm <?> "operator"
-    opComp = between grave grave (term1 <$> many (opSub <|> term))
-    opNorm = atom <$> operator
+    opComp = between grave grave (term1 <$> many opterm)
     grave = symbol "`"
 
 ident :: Monad m => Parser m Term
@@ -154,6 +156,14 @@ term = termSugar <|> ident <|> tcomp
         term >>= liftM2 (<|>) tasymm tcomp'
     tasymm t = symbol "!" >> Asymm t <$> term
     tcomp' t = Compound . (t:) <$>  terms
+
+opterm :: Monad m => Parser m Term
+opterm = opSub <|> termSugar <|> ident <|> tcomp
+  where
+    tcomp = (<?> "compound term") . parens . option term0 $
+        opterm >>= liftM2 (<|>) tasymm tcomp'
+    tasymm t = symbol "!" >> Asymm t <$> opterm
+    tcomp' t = Compound . (t:) <$> many opterm
 
 terms :: Monad m => Parser m [Term]
 terms = many term
@@ -203,8 +213,8 @@ subDecls col = (join *** join) . partitionEithers <$> many (offside col >> decl)
 defn :: Monad m => Parser m [Definition]
 defn = decl >>= either (const $ unexpected "declaration") return
 
-rule :: Monad m => Parser m [Declaration]
-rule = decl >>= either return (const $ unexpected "definition")
+rule :: Monad m => Parser m [Context]
+rule = decl >>= either (return . map _decRule) (const $ unexpected "definition")
 
 imprt :: Parser IO [Definition]
 imprt = reserved "import" >> stringLiteral >>= subParse
@@ -287,12 +297,13 @@ liftErr (Right v)= Right v
 testParse :: String -> IO (Either ParseError [Definition])
 testParse = runParserT prog emptyState "<local>"
 
-readInput :: String -> Either CompilationError [Declaration]
+readInput :: String -> Either CompilationError [Context]
 readInput = liftErr . runParser (rule <* eof) emptyState "<local>"
 
 prelude :: [Definition]
 prelude = forceEither . runParser progSafe prelState "<prelude>" $
-    "data ();\n\
+    "!;\n\
+    \data ();\n\
     \data Z;\n\
     \data S x;\n\
     \data Nil;\n\
