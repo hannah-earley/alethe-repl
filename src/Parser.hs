@@ -3,6 +3,7 @@ module Parser
 , testParse
 , readInput
 , prelude
+, Request(..)
 ) where
 
 import Text.Parsec
@@ -10,9 +11,10 @@ import qualified Text.Parsec.Error as E
 import qualified Text.Parsec.Token as T
 import Text.Parsec.Language (haskellStyle)
 import Data.Either (partitionEithers)
+import Data.Tuple (swap)
 
 import Control.Applicative ((<*), (<$))
-import Control.Monad (liftM2,join)
+import Control.Monad (liftM2,liftM3,ap,join)
 import Control.Arrow ((***))
 import Control.Monad.Trans (liftIO)
 import Control.Exception (bracket)
@@ -35,7 +37,7 @@ import Miscellanea
 
 lexer = T.makeTokenParser kappaStyle
 kappaStyle = haskellStyle
-               { T.reservedNames = [ "import", "data" ]
+               { T.reservedNames = [ "import", "data", "_" ]
                , T.identStart    = nota reservedIdStart
                , T.identLetter   = nota reservedIdLetter
                , T.opStart       = nota reservedOpStart
@@ -170,8 +172,9 @@ terms :: Monad m => Parser m [Term]
 terms = many term
 
 termSugar :: Monad m => Parser m Term
-termSugar = tdoll <|> tnat <|> tstr <|> tlist
+termSugar = tterm <|> tdoll <|> tnat <|> tstr <|> tlist
   where
+    tterm = try (reserved "_") $> termTerm
     tdoll = symbol "$" $> Asymm atomPlus atomMinus
     tnat  = nat <$> natural
     tstr  = str <$> stringLiteral
@@ -204,18 +207,17 @@ decl' col = dterm <|> dmult <|> dsing
     
     dots    = length <$> many1 dot
     dotrel  = (Left <$> dots)          <|> (symbol "=" >> Right <$> party)
-    relop   = (Nothing <$ symbol "=")  <|> (Just <$> oper)
     party   = braces (semiSep context) <|> pure <$> try context
     context = liftM2 Context (option term0 term <* symbol "|") terms
+
+relop :: Monad m => Parser m (Maybe Term)
+relop = (Nothing <$ symbol "=") <|> (Just <$> oper)
 
 subDecls :: Monad m => Column -> Parser m ([Declaration], [Definition])
 subDecls col = (join *** join) . partitionEithers <$> many (offside col >> decl) 
 
 defn :: Monad m => Parser m [Definition]
 defn = decl >>= either (const $ unexpected "declaration") return
-
-rule :: Monad m => Parser m [Context]
-rule = decl >>= either (return . map _decRule) (const $ unexpected "definition")
 
 imprt :: Parser IO [Definition]
 imprt = reserved "import" >> stringLiteral >>= subParse
@@ -298,9 +300,44 @@ liftErr (Right v)= Right v
 testParse :: String -> IO (Either ParseError [Definition])
 testParse = runParserT prog emptyState "<local>"
 
-readInput :: String -> Either CompilationError [Context]
-readInput = liftErr . runParser (whiteSpace >> rule <* eof) emptyState "<local>"
-
 prelude :: [Definition]
 prelude = forceEither $ runParser progSafe prelState "<prelude>" prelude'
   where prelState = emptyState { scopeCounter = -1000000 }
+
+-- user input
+
+data Request = EvaluateOpen   [Term]
+             | EvaluateClosed [Term] [Term]
+             | Load           [FilePath]
+             | Reload
+             | Quit
+             | Noop
+             | ShowVars
+             | ShowProg
+             deriving (Show)
+
+rule :: Monad m => Parser m Request
+rule = (EvaluateOpen <$> ruleOpen) <|> (uncurry EvaluateClosed <$> ruleClosed)
+  where
+    ruleOpen = symbol "|" >> many opterm <?> "open rule"
+    ruleClosed = direction `ap` liftM3 combine terms relop terms <?> "closed rule"
+    direction = (symbol ">" $> id) <|> (symbol "<" $> swap)
+
+    combine lhs Nothing   rhs = ( lhs, rhs )
+    combine lhs (Just op) rhs = ( [op] ++ lhs ++ [termTerm]
+                                , [termTerm] ++ rhs ++ [op] )
+
+cmd :: Monad m => Parser m Request
+cmd = char ':' >> (quit <|> reload <|> load <|> showv <|> showp)
+  where
+    quit = Quit <$ symbol "q" <?> "quit (:q)"
+    reload = Reload <$ symbol "r" <?> "reload (:r)"
+    load = symbol "l" >> Load <$> many file <?> "load (:l file1 ...)"
+    showv = ShowVars <$ symbol "v" <?> "list variables (:v)"
+    showp = ShowProg <$ symbol "p" <?> "show program (:p)"
+    file = stringLiteral <|> lexeme (many1 . satisfy $ not . nonVisible)
+
+
+readInput :: String -> Either CompilationError Request
+readInput = liftErr . runParser inp emptyState "<local>"
+  where inp = whiteSpace >> option Noop (cmd <|> rule) <* eof

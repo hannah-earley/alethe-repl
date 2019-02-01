@@ -195,7 +195,7 @@ class Kappa a where
     -- once, but subAllDup allows for multiple occurences
     sub :: Map String Term -> a -> (Map String Term, a)
     subAll :: Map String Term -> a -> Maybe (Map String Term, a)
-    subAllDup :: Map String Term -> a -> Maybe a
+    subAllDup :: Map String Term -> a -> Either [String] a
 
     compatible :: a -> a -> Bool
 
@@ -229,7 +229,7 @@ instance (Show a, Kappa a) => Kappa [a] where
                          (m'',xs') <- subAll m' xs
                          return (m'', x':xs')
 
-    subAllDup = mapM . subAllDup
+    subAllDup m = mapLeft concat . combineEithers . map (subAllDup m)
 
     compatible xs ys = maybe False (all $ uncurry compatible) $ zipStrict xs ys
 
@@ -271,8 +271,8 @@ instance Kappa Term where
     subAll m (Compound t) = fmap Compound <$> subAll m t
 
     subAllDup _ a@(Atom _ _) = return a
-    subAllDup m (Var v)      = m M.!? v
-    subAllDup _ (Asymm _ _)  = Nothing
+    subAllDup m (Var v)      = maybe (Left [v]) return $ m M.!? v
+    subAllDup _ (Asymm _ _)  = Left []
     subAllDup m (Compound t) = Compound <$> subAllDup m t
 
     compatible (Var _)      _             = True
@@ -304,7 +304,9 @@ instance Kappa Context where
                                         (m'',p') <- subAll m' p
                                         return (m'', Context c' p')
 
-    subAllDup m (Context c p) = liftM2 Context (subAllDup m c) (subAllDup m p)
+    subAllDup m (Context c p) = go <$> subAllDup m (c:p)
+      where go (c':p') = Context c' p'
+            go []      = undefined
 
     compatible (Context c1 p1) (Context c2 p2) = compatible c1 c2 && compatible p1 p2
 
@@ -320,10 +322,10 @@ data Strategy = StratHalt [Term]
                          , _stRPatt :: [Context] }
 
 data CompilationError = ParseError PE.ParseError
-                | AmbiguityError [Definition]
-                | ReversibilityError [Definition]
-                | VarConflictError [Definition]
-                | NonlocalContextError [Definition]
+                      | AmbiguityError [Definition]
+                      | ReversibilityError [Definition]
+                      | VarConflictError [Definition]
+                      | NonlocalContextError [Definition]
 
 instance Show Strategy where
     show (StratHalt t) = show (Terminus t)
@@ -361,7 +363,16 @@ data EvalStatus = EvalOk
                 | EvalUndefined
                 | EvalMalformed
                 | EvalCorrupt
-                deriving (Eq,Ord,Show)
+                deriving (Eq,Ord)
+
+instance Show EvalStatus where
+    show EvalOk        = "Evaluation successfully halted."
+    show EvalStuck     = "No successor found, evaluation stuck."
+    show EvalAmbiguous = "Non-determinism encountered, successor state is ambiguous."
+    show EvalUndefined = "Term or one of its subterms is undefined."
+    show EvalMalformed = "Malformed input, perhaps an unexpected variable or asymmetry."
+    show EvalCorrupt   = "Unexpected internal error..."
+
 
 combineEvals :: [(EvalStatus, a)] -> (EvalStatus, [a])
 combineEvals [] = (EvalOk, [])
@@ -433,7 +444,7 @@ eval prog (Strategy lhs rules plan rhs) lent =
     isp = isHalting prog
     goPlan ridx = let (Context (Var v) patt) = rules ! ridx in (v, patt)
     plan' = map (either2 goPlan) plan
-    evalPL = Compound . evaluatePartialLocal prog
+    evalPL = Compound . snd . evaluateLocal prog
 
     execute mvars (False, (v, patt)) =
         do (mvars',ent) <- subAll mvars patt
@@ -464,8 +475,14 @@ evaluateLocal :: Program -> [Term] -> (EvalStatus, [Term])
 evaluateLocal prog ts =
     let c = phony "<|local|>" in
     case evaluate prog [Context c ts] of
-        (e, [Context c' ts']) | c == c' -> (e,           ts')
-        _                               -> (EvalCorrupt, ts)
+        (e, [Context c' ts']) | c == c'   -> (e,           ts')
+                              | otherwise -> (EvalCorrupt, ts')
+        _                                 -> (EvalCorrupt, ts)
 
-evaluatePartialLocal :: Program -> [Term] -> [Term]
-evaluatePartialLocal prog = snd . evaluateLocal prog
+evaluateRecLocal :: Program -> [Term] -> (EvalStatus, [Term])
+evaluateRecLocal prog ts =
+    let c = phony "<|local|>" in
+    case evaluateRec prog [Context c ts] of
+        (e, [Context c' ts']) | c == c'   -> (e,           ts')
+                              | otherwise -> (EvalCorrupt, ts')
+        _                                 -> (EvalCorrupt, ts)
