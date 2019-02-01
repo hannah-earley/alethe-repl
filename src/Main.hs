@@ -15,4 +15,4 @@ test2 x = do Right prog <- compile ["kap/test.k"]
 
 
 main :: IO ()
-main = putStrLn "Hello, Haskell!"
+main = putStrLn . show =<< test2 "[1 2 4 8 16 32 64 128 256 512 1024] `Map (* 32)`."

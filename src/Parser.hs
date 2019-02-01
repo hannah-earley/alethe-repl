@@ -49,6 +49,7 @@ stringLiteral = T.stringLiteral lexer
 natural       = T.natural       lexer
 symbol        = T.symbol        lexer
 lexeme        = T.lexeme        lexer
+whiteSpace    = T.whiteSpace    lexer
 parens        = T.parens        lexer
 braces        = T.braces        lexer
 brackets      = T.brackets      lexer
@@ -235,10 +236,10 @@ datum' t = halts ++ [mkDef . concat $ zipWith go ps vs]
         mkDef = Rule [Context p0 [opt, termTerm]] [Context p0 [termTerm, t'', opt]]
 
 prog :: Parser IO [Definition]
-prog = concat <$> manyTill (imprt <|> datum <|> defn) eof
+prog = whiteSpace >> concat <$> manyTill (imprt <|> datum <|> defn) eof
 
 progSafe :: Monad m => Parser m [Definition]
-progSafe = concat <$> manyTill (datum <|> defn) eof
+progSafe = whiteSpace >> concat <$> manyTill (datum <|> defn) eof
 
 -- file level parsing
 
@@ -298,16 +299,8 @@ testParse :: String -> IO (Either ParseError [Definition])
 testParse = runParserT prog emptyState "<local>"
 
 readInput :: String -> Either CompilationError [Context]
-readInput = liftErr . runParser (rule <* eof) emptyState "<local>"
+readInput = liftErr . runParser (whiteSpace >> rule <* eof) emptyState "<local>"
 
 prelude :: [Definition]
-prelude = forceEither . runParser progSafe prelState "<prelude>" $
-    "!;\n\
-    \data ();\n\
-    \data Z;\n\
-    \data S x;\n\
-    \data Nil;\n\
-    \data Cons car cdr;\n\
-    \data Plus;\n\
-    \data Minus;"
+prelude = forceEither $ runParser progSafe prelState "<prelude>" prelude'
   where prelState = emptyState { scopeCounter = -1000000 }
