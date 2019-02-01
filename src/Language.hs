@@ -184,7 +184,7 @@ zipStrict []     []     = Just []
 zipStrict (x:xs) (y:ys) = (:) (x,y) <$> zipStrict xs ys
 zipStrict _      _      = Nothing
 
-instance Kappa a => Kappa [a] where
+instance (Show a, Kappa a) => Kappa [a] where
     asplit = unzip . map asplit
 
     vars' = M.unionsWith (+) . map vars'
@@ -253,21 +253,24 @@ instance Kappa Context where
     vars' (Context c p)= M.unionWith (+) (vars' c) (vars' p)
     vars (Context c p) = S.union (vars c) (vars p)
 
-    unify p (Context c1 p1) (Context c2 p2) = unify p (c1:p1) (c2:p2)
+    unify p (Context c1 p1)      (Context c2 p2) = unify p (c1:p1) (c2:p2)
 
     sub m (Context c p) = let (m',c') = sub m c
                               (m'',p') = sub m' p
                           in (m'', Context c' p')
 
-    subAll m (Context c p) = do (m',c') <- subAll m c
-                                (m'',p') <- subAll m' p
-                                return (m'', Context c' p')
+    subAll m (Context v@(Var _) p) = let (m',v') = sub m v
+                                     in fmap (Context v') <$> subAll m' p
+    subAll m (Context c p)         = do (m',c') <- subAll m c
+                                        (m'',p') <- subAll m' p
+                                        return (m'', Context c' p')
 
     compatible (Context c1 p1) (Context c2 p2) = compatible c1 c2 && compatible p1 p2
 
 -- compilation
 
-newtype Program = Program [Strategy]
+    -- (curr label, inverse label, stratagem)
+newtype Program = Program [(Int,Int,Strategy)]
 
 data Strategy = StratHalt [Term]
               | Strategy { _stLPatt :: [Context]
@@ -320,23 +323,24 @@ data EvalStatus = EvalOk
                 deriving (Eq,Ord,Show)
 
 combineEvals :: [(EvalStatus, a)] -> (EvalStatus, [a])
-combineEvals = first maximum . unzip
+combineEvals [] = (EvalOk, [])
+combineEvals es = first maximum $ unzip es
 
 evalMap :: (a -> b) -> (EvalStatus, a) -> (EvalStatus, b)
 evalMap f (e, x) = (e, f x)
 
-match :: Program -> [Context] -> [(Int,Strategy)]
+match :: Program -> [Context] -> [(Int,Int,Strategy)]
 match (Program [])     _ = []
-match (Program (x:xs)) c =
-    let rest = map (first succ) $ match (Program xs) c
-    in case x of
-        StratHalt p       | compatible [p] (map _cTerm c) -> (0,x) : rest
-        Strategy  p _ _ _ | compatible  p  c              -> (0,x) : rest
-        _                                                 ->         rest
+match (Program (x@(_,_,x'):xs)) c =
+    let rest = match (Program xs) c
+    in case x' of
+        StratHalt p       | compatible [p] (map _cTerm c) -> x : rest
+        Strategy  p _ _ _ | compatible  p  c              -> x : rest
+        _                                                 ->     rest
 
 isHalting :: Program -> [Term] -> Bool
 isHalting (Program []) _       = False
-isHalting (Program (StratHalt x : _)) c
+isHalting (Program ((_,_,StratHalt x) : _)) c
     | compatible x c           = True
 isHalting (Program (_ : xs)) c = isHalting (Program xs) c
 
@@ -345,28 +349,32 @@ isHalting (Program (_ : xs)) c = isHalting (Program xs) c
 --    state) so that it can deterministically pick an execution direction
 evaluate :: Program -> [Context] -> (EvalStatus, [Context])
 evaluate prog entity = case match prog entity of
-    []                  -> (EvalUndefined, entity)
-    [(m,StratHalt _),_] -> evaluate' prog m entity
-    [_,(n,StratHalt _)] -> evaluate' prog n entity
-    xs | all sh xs      -> (EvalOk,        entity)
-    _                   -> (EvalAmbiguous, entity)
-  where sh (_, StratHalt _) = True
-        sh _                = False
+    []                    -> (EvalUndefined, entity)
+    [(m,_,StratHalt _),_] -> evaluate' prog m entity
+    [_,(n,_,StratHalt _)] -> evaluate' prog n entity
+    xs | all sh xs        -> (EvalOk,        entity)
+    _                     -> (EvalAmbiguous, entity)
+  where sh (_,_,StratHalt _) = True
+        sh _                 = False
 
 -- evaluate' takes a previous strategy (Int) and continues in the same direction
 evaluate' :: Program -> Int -> [Context] -> (EvalStatus, [Context])
 evaluate' prog prev entity = case match prog entity of
-    [(m,StratHalt _)] | m == prev               -> (EvalOk,        entity)
-    [(m,s1),(n,s2)]   | m == prev               -> go n s2
-                      | n == prev               -> go m s1
-    [(n,s)]           | n /= prev               -> go n s
+    [(m,_,StratHalt _)]   | m == prev               -> (EvalOk,        entity)
+    [(m,m',s1),(n,n',s2)] | m' == prev              -> go n s2
+                          | n' == prev              -> go m s1
+    [(n,n',s)]            | n' /= prev              -> go n s
         -- ^ the entity may no longer match the previous strategy
         --   if a parenthetical term has transitioned away
-    xs                | any ((==prev) . fst) xs -> (EvalAmbiguous, entity)
-    []                                          -> (EvalStuck,     entity)
-    _                                           -> (EvalCorrupt,   entity)
+    xs                    | any successor xs        -> (EvalAmbiguous, entity)
+    []                                              -> (EvalStuck,     entity)
+    _                                               -> (EvalCorrupt,   entity)
   where
-    go n s = maybe (EvalStuck, entity) (evaluate' prog n) $ eval prog s entity
+    go _ (StratHalt _) = (EvalOk, entity)
+    go n s = case eval prog s entity of
+               Nothing -> (EvalStuck, entity)
+               Just x  -> evaluate' prog n x
+    successor (_,n,_) = n == prev
 
 eval :: Program -> Strategy -> [Context] -> Maybe [Context]
 eval _    (StratHalt _)                 lent = Just lent
@@ -387,9 +395,9 @@ eval prog (Strategy lhs rules plan rhs) lent =
         do (mvars',ent) <- subAll mvars patt
            return $ M.insert v (evalPL ent) mvars'
     execute mvars (True,  (v, patt)) =
-        mvars M.!? v >>= \case
-            Compound ent -> unify isp patt ent
-            _            -> Nothing
+        subAll mvars (Var v) >>= \case
+            (mvars', Compound ent) -> unify isp patt ent >>= mapMergeDisjoint mvars'
+            _                      -> Nothing
 
 evaluatePartial :: Program -> [Context] -> [Context]
 evaluatePartial prog = snd . evaluate prog
