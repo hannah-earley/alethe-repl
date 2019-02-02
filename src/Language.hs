@@ -325,7 +325,6 @@ data CompilationError = ParseError PE.ParseError
                       | AmbiguityError [Definition]
                       | ReversibilityError [Definition]
                       | VarConflictError [Definition]
-                      | NonlocalContextError [Definition]
 
 instance Show Strategy where
     show (StratHalt t) = show (Terminus t)
@@ -343,10 +342,9 @@ instance Show Program where
 
 instance Show CompilationError where
     show (ParseError e) = "Parse error!: " ++ show e
-    show (AmbiguityError d) = "Non-determinism detected between the following rules!:" ++ showErrDefs d
-    show (ReversibilityError d) = "Couldn't find a reversible execution plan for the following!:" ++ showErrDefs d
-    show (VarConflictError d) = "Conflicting variables in the following!:" ++ showErrDefs d
-    show (NonlocalContextError d) = "Non-local contexts and multiparty definitions are unsupported!:" ++ showErrDefs d
+    show (AmbiguityError d) = "Non-determinism detected within the following rules:" ++ showErrDefs d
+    show (ReversibilityError d) = "Couldn't find a reversible execution plan for the following:" ++ showErrDefs d
+    show (VarConflictError d) = "Conflicting variables in the following:" ++ showErrDefs d
 
 stripChildren :: Definition -> Definition
 stripChildren (Terminus t) = Terminus (t)
