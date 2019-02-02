@@ -51,7 +51,7 @@ showVars = mapM_ go . M.toList
   where go (v,x) = putStrLn $ "  " ++ v ++ " -> " ++ show x
 
 goEval :: [Term] -> EnvIO (Maybe [Term])
-goEval t = do prog <- program <$> get
+goEval t = do progr <- program <$> get
               binds <- bindings <$> get
               case subAllDup binds t of
                 Left vs -> liftIO $ do
@@ -59,7 +59,7 @@ goEval t = do prog <- program <$> get
                                ++ showMany ", " (Var <$> vs)
                     return Nothing
                 Right t' ->
-                  case evaluateRecLocal prog t' of
+                  case evaluateRecLocal progr t' of
                     (EvalOk, t'') -> liftIO $ do
                         putStrLn $ showSp t''
                         return $ Just t''
@@ -70,8 +70,8 @@ goEval t = do prog <- program <$> get
                         return Nothing
 
 goMatch :: [Term] -> [Term] -> EnvIO ()
-goMatch p t = do prog <- program <$> get
-                 case unifyDup (isHalting prog) p t of
+goMatch p t = do progr <- program <$> get
+                 case unifyDup (isHalting progr) p t of
                    Nothing -> liftIO $ putStrLn "Couldn't unify resultant term."
                    Just vs -> liftIO (showVars vs) >> go vs
   where go binds' = modify $ \e -> e { bindings = binds' `M.union` bindings e }
