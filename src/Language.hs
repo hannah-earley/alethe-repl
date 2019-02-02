@@ -196,6 +196,8 @@ class Kappa a where
     sub :: Map String Term -> a -> (Map String Term, a)
     subAll :: Map String Term -> a -> Maybe (Map String Term, a)
     subAllDup :: Map String Term -> a -> Either [String] a
+    subAllRun :: Program -> Map String Term -> a -> Maybe (Map String Term, a)
+    evalPL :: Program -> [a] -> [a]
 
     compatible :: a -> a -> Bool
 
@@ -231,7 +233,18 @@ instance (Show a, Kappa a) => Kappa [a] where
 
     subAllDup m = mapLeft concat . combineEithers . map (subAllDup m)
 
+    subAllRun prog m xs = do (m',xs') <- subAllRun1 prog m xs
+                             return (m', evalPL prog xs')
+
+    evalPL = map . evalPL
+
     compatible xs ys = maybe False (all $ uncurry compatible) $ zipStrict xs ys
+
+subAllRun1 :: Kappa a => Program -> Map String Term -> [a] -> Maybe (Map String Term, [a])
+subAllRun1 _    m []     = do return (m, [])
+subAllRun1 prog m (x:xs) = do (m',x') <- subAllRun prog m x
+                              (m'',xs') <- subAllRun1 prog m' xs
+                              return (m'', x':xs')
 
 instance Kappa Term where
     asplit = liftM2 (,) termLeft termRight
@@ -275,6 +288,13 @@ instance Kappa Term where
     subAllDup _ (Asymm _ _)  = Left []
     subAllDup m (Compound t) = Compound <$> subAllDup m t
 
+    subAllRun _    m a@(Atom _ _) = Just (m,a)
+    subAllRun _    m (Var v)      = (M.delete v m,) <$> m M.!? v
+    subAllRun _    _ (Asymm _ _)  = Nothing -- asymm's have no right being here!
+    subAllRun prog m (Compound t) = fmap Compound <$> subAllRun prog m t
+
+    evalPL prog = snd . evaluateLocal prog
+
     compatible (Var _)      _             = True
     compatible _            (Var _)       = True
     compatible a@(Atom _ _) b@(Atom _ _)  = a == b
@@ -307,6 +327,14 @@ instance Kappa Context where
     subAllDup m (Context c p) = go <$> subAllDup m (c:p)
       where go (c':p') = Context c' p'
             go []      = undefined
+
+    subAllRun prog m (Context v@(Var _) p) = let (m',v') = sub m v
+                                             in fmap (Context v') <$> subAllRun1 prog m' p
+    subAllRun prog m (Context c p)         = do (m',c') <- subAll m c
+                                                (m'',p') <- subAllRun1 prog m' p
+                                                return (m'', Context c' p')
+
+    evalPL prog = snd . evaluate prog
 
     compatible (Context c1 p1) (Context c2 p2) = compatible c1 c2 && compatible p1 p2
 
@@ -441,25 +469,24 @@ eval prog (Strategy lhs rules plan rhs) lent =
   do
     lvars        <- unify isp lhs lent
     rvars        <- foldM execute lvars plan'
-    (vars0,rent) <- subAll rvars rhs
+    (vars0,rent) <- subAllRun1 prog rvars rhs
+    -- (vars0,rent) <- subAll rvars rhs
     guard $ M.null vars0
     return rent
   where
     isp = isHalting prog
     goPlan ridx = let (Context (Var v) patt) = rules ! ridx in (v, patt)
     plan' = map (either2 goPlan) plan
-    evalPL = Compound . snd . evaluateLocal prog
 
     execute mvars (False, (v, patt)) =
-        do (mvars',ent) <- subAll mvars patt
-           return $ M.insert v (evalPL ent) mvars'
+        -- do (mvars',ent) <- subAll mvars patt
+        --    return $ M.insert v (Compound $ evalPL prog ent) mvars'
+        do (mvars',ent) <- subAllRun prog mvars patt
+           return $ M.insert v (Compound ent) mvars'
     execute mvars (True,  (v, patt)) =
         subAll mvars (Var v) >>= \case
             (mvars', Compound ent) -> unify isp patt ent >>= mapMergeDisjoint mvars'
             _                      -> Nothing
-
-evaluatePartial :: Program -> [Context] -> [Context]
-evaluatePartial prog = snd . evaluate prog
 
 evaluateRec :: Program -> [Context] -> (EvalStatus, [Context])
 evaluateRec prog = combineEvals . map goc
