@@ -1,6 +1,7 @@
 module Parser
 ( loadPrograms
 , testParse
+, testLoad
 , readInput
 , prelude
 , Request(..)
@@ -37,11 +38,12 @@ import Miscellanea
 
 lexer = T.makeTokenParser kappaStyle
 kappaStyle = haskellStyle
-               { T.reservedNames = [ "import", "data", "_" ]
-               , T.identStart    = nota reservedIdStart
-               , T.identLetter   = nota reservedIdLetter
-               , T.opStart       = nota reservedOpStart
-               , T.opLetter      = T.identLetter kappaStyle }
+               { T.reservedNames   = [ "import", "data", "_", "=" ]
+               , T.reservedOpNames = [ "=" ]
+               , T.identStart      = nota reservedIdStart
+               , T.identLetter     = nota reservedIdLetter
+               , T.opStart         = nota reservedOpStart
+               , T.opLetter        = T.identLetter kappaStyle }
   where nota p = satisfy $ not . p
 
 identifier    = T.identifier    lexer
@@ -130,8 +132,10 @@ kleene alpha = [reverse (x:xs) | xs <- [] : kleene alpha, x <- alpha]
 
 idRaw = lexeme $ many (T.identLetter kappaStyle)
 idQual = stringLiteral <|> idRaw
+notop = try . option () $ operator >>= unexpected . ("operator " ++) . show
 opScoped = liftM2 Atom sid idQual
-  where sid = try $ length <$> many1 (char '~') >>= scopeId
+sid = try $ length <$> many1 (char '~') >>= scopeId
+opScoped' = try $ liftM2 Atom sid (notop >> identifier)
 opScoped0= liftM2 Atom sid0 idQual
   where sid0= try $ char '@' >> scopeId 0
 
@@ -146,11 +150,10 @@ oper = opScoped <|> opComp <|> opNorm <?> "operator"
     grave = symbol "`"
 
 ident :: Monad m => Parser m Term
-ident = opScoped0 <|> idHash <|> idFree `labels` ["atom", "variable"]
+ident = opScoped0 <|> opScoped' <|> idHash <|> idFree `labels` ["atom", "variable"]
   where
     idHash = char '#' >> (opScoped <|> atom <$> idQual)
     idFree = notop >> resolveAtomVar <$> identifier
-    notop = try . option () $ operator >>= unexpected . ("operator " ++) . show
 
 term :: Monad m => Parser m Term
 term = termSugar <|> ident <|> tcomp
@@ -206,12 +209,12 @@ decl' col = dterm <|> dmult <|> dsing
     def1 top = colon >> uncurry ((:) . top) <$> subDecls col
     
     dots    = length <$> many1 dot
-    dotrel  = (Left <$> dots)          <|> (symbol "=" >> Right <$> party)
+    dotrel  = (Left <$> dots)          <|> (reserved "=" >> Right <$> party)
     party   = braces (semiSep context) <|> pure <$> try context
     context = liftM2 Context (option term0 term <* symbol "|") terms
 
 relop :: Monad m => Parser m (Maybe Term)
-relop = (Nothing <$ symbol "=") <|> (Just <$> oper)
+relop = (Nothing <$ reserved "=") <|> (Just <$> oper)
 
 subDecls :: Monad m => Column -> Parser m ([Declaration], [Definition])
 subDecls col = (join *** join) . partitionEithers <$> many (offside col >> decl) 
@@ -297,8 +300,9 @@ liftErr :: Either ParseError a -> Either CompilationError a
 liftErr (Left e) = Left $ ParseError e
 liftErr (Right v)= Right v
 
-testParse :: String -> IO (Either ParseError [Definition])
-testParse = runParserT prog emptyState "<local>"
+testParse :: Parser IO x -> String -> IO (Either ParseError x)
+testParse p = runParserT p emptyState "<local>"
+testLoad = testParse prog
 
 prelude :: [Definition]
 prelude = forceEither $ runParser progSafe prelState "<prelude>" prelude'

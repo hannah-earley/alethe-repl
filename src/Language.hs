@@ -110,7 +110,7 @@ instance Show Context where
     show (Context c p) = show c ++ "| " ++ showSp p
 
 nonVisible       = isControl        ||| isSpace  ||| isSeparator
-reservedIdLetter = nonVisible       ||| (`elem` ".:;`#|!$=~@()[]{}\"")
+reservedIdLetter = nonVisible       ||| (`elem` ".:;`#|!$~@()[]{}\"")
 reservedIdStart  = reservedIdLetter ||| isDigit
 reservedOpStart  = reservedIdStart  ||| isLetter ||| (`elem` "'_")
 
