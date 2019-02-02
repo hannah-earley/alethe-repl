@@ -16,7 +16,6 @@ import Data.Tuple (swap)
 
 import Control.Applicative ((<*), (<$))
 import Control.Monad (liftM2,liftM3,ap,join)
-import Control.Arrow ((***))
 import Control.Monad.Trans (liftIO)
 import Control.Exception (bracket)
 import Data.Set (Set)
@@ -184,27 +183,35 @@ termSugar = tterm <|> tdoll <|> tnat <|> tstr <|> tlist
     tlist = (<?> "list") . brackets $ liftM2 sexpr terms
                                       (option atomNil $ symbol "." >> term)
 
-decl :: Monad m => Parser m (Either [Declaration] [Definition])
+decl :: Monad m => Parser m [Either Declaration Definition]
 decl = getCol >>= withScope . decl'
 decl' col = dterm <|> dmult <|> dsing
   where
-    dterm = symbol "!" >> Right . pure . Terminus <$> manyTill term semi
-    dmult = join $ def    <$> party <*> dotrel
-    dsing = join $ dsing' <$> terms <*> relop <*> terms
+    dterm = symbol "!" >> terms >>= liftM2 (<|>) dterm' dterm''
+    dmult = join $ def       <$> party <*> dotrel
+    dsing = join $ dsing' [] <$> terms <*> relop <*> terms
 
-    dsing' lhs Nothing   rhs = localCtxt >>= liftM2 (<|>) f g
-      where f c = dots >>= def [c lhs, c rhs] . Left
-            g c =          def [c lhs]         (Right [c rhs])
+    dterm'  t   = semi $> [Right $ Terminus t]
+    dterm'' lhs = fmap go . join $ dsing' [] lhs <$> relop <*> terms'
+      where
+        terms' = terms <* lookAhead dot
+        go (x@(Left d) : xs) = x : Right (Terminus . _cTerm $ _decRule d) : go xs
+        go (x          : xs) = x : go xs
+        go []                = []
 
-    dsing' lhs (Just op) rhs = halts <$> dsing' lhs' Nothing rhs'
+    dsing' halts lhs Nothing   rhs = localCtxt >>= liftM2 (<|>) f g
+      where f c = dots      >>= def [c lhs, c rhs] . Left
+            g c = (halts++) <$> def [c lhs]         (Right [c rhs])
+
+    dsing' _     lhs (Just op) rhs = dsing' halts lhs' Nothing rhs'
       where lhs' = [op] ++ lhs ++ [termTerm]
             rhs' = [termTerm] ++ rhs ++ [op]
             halts' (Compound op') = [op']
             halts' _              = []
-            halts = fmap $ (++) (Terminus <$> halts' op ++ [lhs', rhs'])
+            halts = Right . Terminus <$> halts' op ++ [lhs', rhs']
 
-    def lhs (Left w)    = return . Left $ map (Declaration w) lhs
-    def lhs (Right rhs) = Right <$> liftM2 (<|>) def0 def1 (Rule lhs rhs)
+    def lhs (Left w)    = return $ map (Left . Declaration w) lhs
+    def lhs (Right rhs) = (fmap Right) <$> liftM2 (<|>) def0 def1 (Rule lhs rhs)
     def0 top = semi  $> [top []]
     def1 top = colon >> uncurry ((:) . top) <$> subDecls col
     
@@ -217,10 +224,10 @@ relop :: Monad m => Parser m (Maybe Term)
 relop = (Nothing <$ reserved "=") <|> (Just <$> oper)
 
 subDecls :: Monad m => Column -> Parser m ([Declaration], [Definition])
-subDecls col = (join *** join) . partitionEithers <$> many (offside col >> decl) 
+subDecls col = partitionEithers . join <$> many (offside col >> decl) 
 
 defn :: Monad m => Parser m [Definition]
-defn = decl >>= either (const $ unexpected "declaration") return
+defn = decl >>= either (const $ unexpected "declaration") return . sequence
 
 imprt :: Parser IO [Definition]
 imprt = reserved "import" >> stringLiteral >>= subParse
