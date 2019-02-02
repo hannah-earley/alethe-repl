@@ -1,11 +1,4 @@
-module Parser
-( loadPrograms
-, testParse
-, testLoad
-, readInput
-, prelude
-, Request(..)
-) where
+module Parser where
 
 import Text.Parsec
 import qualified Text.Parsec.Error as E
@@ -145,7 +138,7 @@ opNorm = atom <$> operator
 oper :: Monad m => Parser m Term
 oper = opScoped <|> opComp <|> opNorm <?> "operator"
   where
-    opComp = between grave grave (term1 <$> many opterm)
+    opComp = between grave grave (term1 <$> opterms)
     grave = symbol "`"
 
 ident :: Monad m => Parser m Term
@@ -158,9 +151,9 @@ term :: Monad m => Parser m Term
 term = termSugar <|> ident <|> tcomp
   where
     tcomp = (<?> "compound term") . parens . option term0 $
-        term >>= liftM2 (<|>) tasymm tcomp'
-    tasymm t = symbol "!" >> Asymm t <$> term
-    tcomp' t = Compound . (t:) <$>  terms
+        opterm >>= liftM2 (<|>) tasymm tcomp'
+    tasymm t = symbol "!" >> Asymm t <$> opterm
+    tcomp' t = Compound . (t:) <$> opterms
 
 opterm :: Monad m => Parser m Term
 opterm = opSub <|> termSugar <|> ident <|> tcomp
@@ -168,10 +161,13 @@ opterm = opSub <|> termSugar <|> ident <|> tcomp
     tcomp = (<?> "compound term") . parens . option term0 $
         opterm >>= liftM2 (<|>) tasymm tcomp'
     tasymm t = symbol "!" >> Asymm t <$> opterm
-    tcomp' t = Compound . (t:) <$> many opterm
+    tcomp' t = Compound . (t:) <$> opterms
 
 terms :: Monad m => Parser m [Term]
 terms = many term
+
+opterms :: Monad m => Parser m [Term]
+opterms = many opterm
 
 termSugar :: Monad m => Parser m Term
 termSugar = tterm <|> tdoll <|> tnat <|> tstr <|> tlist
@@ -180,8 +176,8 @@ termSugar = tterm <|> tdoll <|> tnat <|> tstr <|> tlist
     tdoll = symbol "$" $> Asymm atomPlus atomMinus
     tnat  = nat <$> natural
     tstr  = str <$> stringLiteral
-    tlist = (<?> "list") . brackets $ liftM2 sexpr terms
-                                      (option atomNil $ symbol "." >> term)
+    tlist = (<?> "list") . brackets $ liftM2 sexpr opterms
+                                      (option atomNil $ symbol "." >> opterm)
 
 decl :: Monad m => Parser m [Either Declaration Definition]
 decl = getCol >>= withScope . decl'
@@ -233,7 +229,7 @@ imprt :: Parser IO [Definition]
 imprt = reserved "import" >> stringLiteral >>= subParse
 
 datum :: Monad m => Parser m [Definition]
-datum = reserved "data" >> datum' <$> (terms <* semi)
+datum = reserved "data" >> datum' <$> (opterms <* semi)
 datum' t = halts ++ [mkDef . concat $ zipWith go ps vs]
   where (p0:p1:ps,qs) = split phantoms
         vs = S.toList $ vars t
@@ -330,7 +326,7 @@ data Request = EvaluateOpen   [Term]
 rule :: Monad m => Parser m Request
 rule = (EvaluateOpen <$> ruleOpen) <|> (uncurry EvaluateClosed <$> ruleClosed)
   where
-    ruleOpen = symbol "|" >> many opterm <?> "open rule"
+    ruleOpen = symbol "|" >> opterms <?> "open rule"
     ruleClosed = direction `ap` liftM3 combine terms relop terms <?> "closed rule"
     direction = (symbol ">" $> id) <|> (symbol "<" $> swap)
 

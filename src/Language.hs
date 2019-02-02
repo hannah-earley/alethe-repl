@@ -387,7 +387,9 @@ data EvalStatus = EvalOk
                 | EvalStuck
                 | EvalAmbiguous
                 | EvalUndefined
+                | EvalBadInitial
                 | EvalMalformed
+                | EvalMulti
                 | EvalCorrupt
                 deriving (Eq,Ord)
 
@@ -396,16 +398,15 @@ instance Show EvalStatus where
     show EvalStuck     = "No successor found, evaluation stuck."
     show EvalAmbiguous = "Non-determinism encountered, successor state is ambiguous."
     show EvalUndefined = "Term or one of its subterms is undefined."
+    show EvalBadInitial= "Cannot construct a non-halting term, perhaps you forgot to declare a halting state?"
     show EvalMalformed = "Malformed input, perhaps an unexpected variable or asymmetry."
+    show EvalMulti     = "Multiple parties encountered, this is not supported."
     show EvalCorrupt   = "Unexpected internal error..."
 
 
 combineEvals :: [(EvalStatus, a)] -> (EvalStatus, [a])
 combineEvals [] = (EvalOk, [])
 combineEvals es = first maximum $ unzip es
-
-evalMap :: (a -> b) -> (EvalStatus, a) -> (EvalStatus, b)
-evalMap f (e, x) = (e, f x)
 
 match :: Program -> [Context] -> [(Int,Int,Strategy)]
 match (Program [])     _ = []
@@ -438,7 +439,7 @@ evaluate prog entity =
     (_:_,[])  -> (EvalOk,            entity)
     (_:_,_)   -> (EvalAmbiguous,     entity)
     ([],[])   -> (EvalUndefined,     entity)
-    ([],_)    -> (EvalMalformed,     entity)
+    ([],_)    -> (EvalBadInitial,    entity)
 
 haltp (_,_,StratHalt _) = True
 haltp _                 = False
@@ -470,7 +471,6 @@ eval prog (Strategy lhs rules plan rhs) lent =
     lvars        <- unify isp lhs lent
     rvars        <- foldM execute lvars plan'
     (vars0,rent) <- subAllRun1 prog rvars rhs
-    -- (vars0,rent) <- subAll rvars rhs
     guard $ M.null vars0
     return rent
   where
@@ -479,8 +479,6 @@ eval prog (Strategy lhs rules plan rhs) lent =
     plan' = map (either2 goPlan) plan
 
     execute mvars (False, (v, patt)) =
-        -- do (mvars',ent) <- subAll mvars patt
-        --    return $ M.insert v (Compound $ evalPL prog ent) mvars'
         do (mvars',ent) <- subAllRun prog mvars patt
            return $ M.insert v (Compound ent) mvars'
     execute mvars (True,  (v, patt)) =
@@ -495,7 +493,7 @@ evaluateRec prog = combineEvals . map goc
                             (e, Compound ent') -> (e,           Context c ent')
                             _                  -> (EvalCorrupt, Context c ent)
 
-    go (Compound ts) = evalMap Compound $
+    go (Compound ts) = Compound <$>
                        case combineEvals $ map go ts of
                          (EvalOk,ts') -> evaluateLocal prog ts'
                          (e,ts')      -> (e, ts')
@@ -508,7 +506,7 @@ evaluateLocal prog ts =
     case evaluate prog [Context c ts] of
         (e, [Context c' ts']) | c == c'   -> (e,           ts')
                               | otherwise -> (EvalCorrupt, ts')
-        _                                 -> (EvalCorrupt, ts)
+        _                                 -> (EvalMulti,   ts)
 
 evaluateRecLocal :: Program -> [Term] -> (EvalStatus, [Term])
 evaluateRecLocal prog ts =
@@ -516,4 +514,4 @@ evaluateRecLocal prog ts =
     case evaluateRec prog [Context c ts] of
         (e, [Context c' ts']) | c == c'   -> (e,           ts')
                               | otherwise -> (EvalCorrupt, ts')
-        _                                 -> (EvalCorrupt, ts)
+        _                                 -> (EvalMulti,   ts)

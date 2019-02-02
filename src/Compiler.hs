@@ -42,9 +42,9 @@ cVar = handle . filter checkDef
 
 -- best case O(n^2), worst O(n^3), average O(n^2)
 cAmbi :: [Definition] -> Either CompilationError ()
-cAmbi defs = handle . map (vdefs !) . nub . concatMap triangles $ terms ++ rules
+cAmbi defs = handle . map (vdefs !) . nub . concatMap triangles $ halts ++ rules
   where vdefs = V.fromList defs
-        (terms,rules) = partitionContexts defs
+        (halts,rules) = partitionContexts defs
         handle [] = Right ()
         handle as = Left $ AmbiguityError as
 
