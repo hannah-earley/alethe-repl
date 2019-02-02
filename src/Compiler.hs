@@ -10,7 +10,7 @@ import qualified Data.Map.Strict as M
 import Data.Vector ((!))
 import qualified Data.Vector as V
 import Control.Arrow ((***))
-import Data.List (nub,intersect)
+import Data.List (nub)
 import Data.Maybe (catMaybes)
 import Data.Either (partitionEithers)
 
@@ -24,7 +24,7 @@ compile0 :: [FilePath] -> IO (Either CompilationError Program)
 compile0 = compWith []
 
 compile' :: [Definition] -> Either CompilationError Program
-compile' ds = fmap Program $ cVar ds >> cCtxt ds >> cAmbi ds >> tgSolves (ds)
+compile' ds = fmap Program $ cVar ds >> cAmbi ds >> tgSolves (ds)
 
 -- phase 1: variable conflict and context scope checks
 
@@ -38,56 +38,25 @@ cVar = handle . filter checkDef
     handle [] = Right ()
     handle ds = Left $ VarConflictError ds
 
-cCtxt :: [Definition] -> Either CompilationError ()
-cCtxt _ = return () -- allow, even though they can't be evaluated..
--- cCtxt = handle . filter (not . checkDef)
---   where
---     checkDef (Terminus _)     = True
---     checkDef (Rule [l] [r] d) = all checkCtxt $ l : r : map _decRule d
---     checkDef _                = False
---     checkCtxt (Context (Var _) _) = True
---     checkCtxt _                   = False
---     handle [] = Right ()
---     handle ds = Left $ NonlocalContextError ds
-
-
 -- phase 2: ambiguity checks
--- pug = pattern unifying graph
 
+-- best case O(n^2), worst O(n^3), average O(n^2)
 cAmbi :: [Definition] -> Either CompilationError ()
-cAmbi defs = handle . map (vdefs !) . nub $ loops ++ branches
+cAmbi defs = handle . map (vdefs !) . nub . concatMap triangles $ terms ++ rules
   where vdefs = V.fromList defs
         (terms,rules) = partitionContexts defs
         handle [] = Right ()
         handle as = Left $ AmbiguityError as
-        
-        loops = detectTriangles $ compatAlist rules
-        branches = map fst $ filter (haltprom . snd) rules
 
-        compats xs c = filter (compatible c . snd) xs
-        haltprom x = haltable x && promisc x
-        haltable = not . null . compats terms
-        promisc x = case compats rules x of
-                      (_:_:_) -> True
-                      _       -> False
+        p (l,c) (l',c') = l /= l' && compatible c c'
+        triangles (l,c) = case promisc $ filter (p (l,c)) rules of
+                            [] -> []
+                            ls -> l:ls
 
-getContexts :: [Definition] -> [(Int,Context)]
-getContexts = snd . partitionContexts
-
-compatAlist :: [(l, Context)] -> [(l, [Int])]
-compatAlist ctxts = map (fmap go) nctxts
-  where go (n,c) = map fst $ filter (p (n, c)) nctxts'
-        nctxts = zipWith (\n (l,c) -> (l,(n,c))) [0..] ctxts
-        nctxts'= map snd nctxts
-        p (n,c) (n',c') = n /= n' && compatible c c'
-
-detectTriangles :: Eq l => [(l, [Int])] -> [l]
-detectTriangles alist = nub . catMaybes $ map go alist
-  where avec = V.fromList alist
-        edges' = snd . (avec !)
-        common x y = not . null $ intersect x y
-        go (l, edges) = if any (common edges . edges') edges
-                        then Just l else Nothing
+        promisc [] = []
+        promisc ((l,c):xs) = case filter (compatible c . snd) xs of
+                               [] -> promisc xs
+                               ys -> (l : map fst ys) ++ promisc xs
 
 partitionContexts :: [Definition] -> ([(Int,Context)],[(Int,Context)])
 partitionContexts = (concat *** concat) . partitionEithers . zipWith f [0..]
