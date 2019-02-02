@@ -42,13 +42,12 @@ switch Reload               = sources <$> get >>= load
 switch (Load fs)            = load fs
 switch (EvaluateOpen t)     = void $ goEval t
 switch (EvaluateClosed t p) = goEval t >>= maybe (return ()) (goMatch p)
-switch ShowVars             = get >>= liftIO . showVars . bindings
+switch ShowVars             = get >>= liftIO . printVars . bindings
 switch ShowProg             = get >>= liftIO . print . program
 switch _                    = undefined
 
-showVars :: Map String Term -> IO ()
-showVars = mapM_ go . M.toList
-  where go (v,x) = putStrLn $ "  " ++ v ++ " -> " ++ show x
+printVars :: Map String Term -> IO ()
+printVars = putStr . showVars
 
 goEval :: [Term] -> EnvIO (Maybe [Term])
 goEval t = do progr <- program <$> get
@@ -59,21 +58,16 @@ goEval t = do progr <- program <$> get
                                ++ showMany ", " (Var <$> vs)
                     return Nothing
                 Right t' ->
-                  case evaluateRecLocal progr t' of
-                    (EvalOk, t'') -> liftIO $ do
-                        putStrLn $ showSp t''
-                        return $ Just t''
-                    (e,t'') -> liftIO $ do
-                        print e
-                        putStr "  "
-                        putStrLn $ showSp t''
-                        return Nothing
+                  let x = evaluateRecLocal progr t'
+                  in liftIO (print x) >> case x of
+                    EvalSuccess t'' -> return $ Just t''
+                    _               -> return $ Nothing
 
 goMatch :: [Term] -> [Term] -> EnvIO ()
 goMatch p t = do progr <- program <$> get
                  case unifyDup (isHalting progr) p t of
                    Nothing -> liftIO $ putStrLn "Couldn't unify resultant term."
-                   Just vs -> liftIO (showVars vs) >> go vs
+                   Just vs -> liftIO (printVars vs) >> go vs
   where go binds' = modify $ \e -> e { bindings = binds' `M.union` bindings e }
 
 load :: [FilePath] -> EnvIO ()
