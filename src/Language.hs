@@ -398,6 +398,12 @@ isHalting (Program (_ : xs)) c = isHalting (Program xs) c
 -- evaluate requires its input to be in a halting state (i.e. an initial
 --    state) so that it can deterministically pick an execution direction
 evaluate :: Program -> [Context] -> (EvalStatus, [Context])
+evaluate _ [Context c [Compound [x, y], z]]
+    | x == atomDup && z == termTerm
+        = (EvalOk, [Context c [z, y, Compound [x, y]]])
+evaluate _ [Context c [z, y, Compound [x, y']]]
+    | x == atomDup && z == termTerm && y == y'
+        = (EvalOk, [Context c [Compound [x, y], z]])
 evaluate prog entity =
   case partition haltp (match prog entity) of
     (_:_,[_]) -> evaluate' prog (-1) entity

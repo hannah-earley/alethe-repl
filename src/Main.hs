@@ -23,7 +23,7 @@ data Env = Env { program  :: Program
 
 main :: IO ()
 main = do files <- getArgs
-          evalStateT (load files >> runInputT defaultSettings loop)
+          evalStateT (load files >> runInputT defaultSettings (withInterrupt loop))
                      Env { program = Program [], sources = [], bindings = M.empty }
 
 type EnvIO = StateT Env IO
