@@ -7,15 +7,12 @@ import Miscellanea
 import Data.Set (Set)
 import qualified Data.Set as S
 import qualified Data.Map.Strict as M
-import Data.Vector (Vector,(!))
+import Data.Vector ((!))
 import qualified Data.Vector as V
-import qualified Data.Array.ST as A
-import Control.Monad.ST (runST,ST)
-import Control.Exception (assert)
-import Control.Monad (filterM)
-import qualified Data.Ix as I
-import Data.List (nub)
+import Control.Arrow ((***))
+import Data.List (nub,intersect)
 import Data.Maybe (catMaybes)
+import Data.Either (partitionEithers)
 
 compWith :: [Definition] -> [FilePath] -> IO (Either CompilationError Program)
 compWith prel ps = loadPrograms ps >>= return . (compile' . (prel++) =<<)
@@ -42,66 +39,61 @@ cVar = handle . filter checkDef
     handle ds = Left $ VarConflictError ds
 
 cCtxt :: [Definition] -> Either CompilationError ()
-cCtxt = handle . filter (not . checkDef)
-  where
-    checkDef (Terminus _)     = True
-    checkDef (Rule [l] [r] d) = all checkCtxt $ l : r : map _decRule d
-    checkDef _                = False
-    checkCtxt (Context (Var _) _) = True
-    checkCtxt _                   = False
-    handle [] = Right ()
-    handle ds = Left $ NonlocalContextError ds
+cCtxt _ = return () -- allow, even though they can't be evaluated..
+-- cCtxt = handle . filter (not . checkDef)
+--   where
+--     checkDef (Terminus _)     = True
+--     checkDef (Rule [l] [r] d) = all checkCtxt $ l : r : map _decRule d
+--     checkDef _                = False
+--     checkCtxt (Context (Var _) _) = True
+--     checkCtxt _                   = False
+--     handle [] = Right ()
+--     handle ds = Left $ NonlocalContextError ds
 
 
 -- phase 2: ambiguity checks
 -- pug = pattern unifying graph
 
-cAmbi :: [Definition] -> Either CompilationError (Vector Definition, Vector (Int,Context))
-cAmbi ds = handle . map resolve $ runST $ pugBuild ctxts >>= pugAmbiguities
-  where
-    defs = V.fromList ds
-    ctxts = V.fromList $ getContexts ds
-    resolve = (defs!) . fst . (ctxts!)
-    handle [] = Right (defs,ctxts)
-    handle as = Left $ AmbiguityError as
+cAmbi :: [Definition] -> Either CompilationError ()
+cAmbi defs = handle . map (vdefs !) . nub $ loops ++ branches
+  where vdefs = V.fromList defs
+        (terms,rules) = partitionContexts defs
+        handle [] = Right ()
+        handle as = Left $ AmbiguityError as
+        
+        loops = detectTriangles $ compatAlist rules
+        branches = map fst $ filter (haltprom . snd) rules
+
+        compats xs c = filter (compatible c . snd) xs
+        haltprom x = haltable x && promisc x
+        haltable = not . null . compats terms
+        promisc x = case compats rules x of
+                      (_:_:_) -> True
+                      _       -> False
 
 getContexts :: [Definition] -> [(Int,Context)]
-getContexts = concat . zipWith f [0..]
-  where f n (Rule lhs rhs _) = map (n,) $ lhs ++ rhs
-        f _ (Terminus _) = []
+getContexts = snd . partitionContexts
 
-pugBuild :: Vector (Int, Context) -> ST s (A.STArray s (Int,Int) Bool)
-pugBuild ctxts =
-    do arr <- A.newArray ((0,0),(n,n)) False
-       sequence_ $ do 
-          x <- range 0       n
-          y <- range (x + 1) n
-          let e = compatible (get x) (get y)
-              w = A.writeArray arr
-          return $ w (x,y) e >> w (y,x) e
-       return arr
-  where
-    n = V.length ctxts - 1
-    get = snd . (ctxts !)
+compatAlist :: [(l, Context)] -> [(l, [Int])]
+compatAlist ctxts = map (fmap go) nctxts
+  where go (n,c) = map fst $ filter (p (n, c)) nctxts'
+        nctxts = zipWith (\n (l,c) -> (l,(n,c))) [0..] ctxts
+        nctxts'= map snd nctxts
+        p (n,c) (n',c') = n /= n' && compatible c c'
 
-range = curry I.range
+detectTriangles :: Eq l => [(l, [Int])] -> [l]
+detectTriangles alist = nub . catMaybes $ map go alist
+  where avec = V.fromList alist
+        edges' = snd . (avec !)
+        common x y = not . null $ intersect x y
+        go (l, edges) = if any (common edges . edges') edges
+                        then Just l else Nothing
 
-pugAmbiguities :: A.STArray s (Int,Int) Bool -> ST s [Int]
-pugAmbiguities arr =
-    do ((0,0),(m,n)) <- A.getBounds arr
-       assert (m == n) $ return ()
-       prune n >> vertices n
-  where
-    edges i n = filterM (A.readArray arr) $ range (i,0) (i,n)
-    pruneEdge [(i,j)] = w2 (i,j) False >> return True
-    pruneEdge _       = return False
-    pruneEdges n = any id <$> sequence [edges i n >>= pruneEdge | i <- range 0 n]
-    prune n = do b <- pruneEdges n
-                 if b then prune n
-                      else return ()
-    vertices n = nub . map snd . concat <$> mapM (flip edges n) (range 0 n)
-    w = A.writeArray arr
-    w2 (i,j) v = w (i,j) v >> w (j,i) v
+partitionContexts :: [Definition] -> ([(Int,Context)],[(Int,Context)])
+partitionContexts = (concat *** concat) . partitionEithers . zipWith f [0..]
+  where f n (Terminus t) = Left [(n,Context (Var "") t)]
+        f n (Rule lhs rhs _) = Right . map (n,) $ lhs ++ rhs
+
 
 -- phase 3: resolving implementation paths
 -- tg = transition graph
