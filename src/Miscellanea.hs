@@ -102,6 +102,9 @@ showMany sep = intercalate sep . map show
 showSp = showMany " "
 showSemi = showMany "; "
 
+indent :: Int -> String -> String
+indent n = unlines . map (replicate n ' ' ++) . lines
+
 list1 :: (a -> b) -> ([a] -> b) -> [a] -> b
 list1 f _ [x] = f x
 list1 _ g xs  = g xs

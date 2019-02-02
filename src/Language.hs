@@ -1,4 +1,5 @@
 {-# LANGUAGE QuasiQuotes #-}
+{-# LANGUAGE FlexibleInstances #-}
 
 module Language where
 
@@ -11,7 +12,6 @@ import Data.Char
 import Data.Maybe (catMaybes)
 import Data.List (intercalate,partition)
 import Control.Monad (liftM2, foldM, guard)
-import Control.Arrow (first)
 import qualified Text.Parsec.Error as PE
 import qualified Text.RawString.QQ as QQ
 
@@ -201,6 +201,10 @@ class Kappa a where
 
     compatible :: a -> a -> Bool
 
+showVars :: Map String Term -> String
+showVars = concatMap go . M.toList
+  where go (v,x) = "  " ++ v ++ " -> " ++ show x ++ "\n"
+
 varsplit :: Kappa a => a -> (Set String, a, a)
 varsplit t = let (l,r) = asplit t in (vars t, l, r)
 
@@ -293,7 +297,11 @@ instance Kappa Term where
     subAllRun _    _ (Asymm _ _)  = Nothing -- asymm's have no right being here!
     subAllRun prog m (Compound t) = fmap Compound <$> subAllRun prog m t
 
-    evalPL prog = snd . evaluateLocal prog
+    evalPL prog t = case evalPartial (evaluateLocal prog t) of
+                      Left [Context _ x] -> x
+                      Left [] -> error "evalPL: all state lost !?"
+                      Left _ -> error "evalPL: multiparty unsupported"
+                      Right x -> x
 
     compatible (Var _)      _             = True
     compatible _            (Var _)       = True
@@ -334,7 +342,7 @@ instance Kappa Context where
                                                 (m'',p') <- subAllRun1 prog m' p
                                                 return (m'', Context c' p')
 
-    evalPL prog = snd . evaluate prog
+    evalPL prog = snd . either2 id . evalPartial . evaluate prog
 
     compatible (Context c1 p1) (Context c2 p2) = compatible c1 c2 && compatible p1 p2
 
@@ -385,17 +393,22 @@ showErrDefs = concatMap (("\n    "++) . show . stripChildren)
 
 data EvalStatus = EvalOk
                 | EvalStuck
+                | EvalUnification  [Context]
+                | EvalSubstitution (Map String Term)
+                | EvalUnconsumed   (Map String Term)
                 | EvalAmbiguous
                 | EvalUndefined
                 | EvalBadInitial
                 | EvalMalformed
                 | EvalMulti
                 | EvalCorrupt
-                deriving (Eq,Ord)
 
 instance Show EvalStatus where
     show EvalOk        = "Evaluation successfully halted."
     show EvalStuck     = "No successor found, evaluation stuck."
+    show (EvalUnification c) = "Couldn't unify against " ++ showCtxts c ++ "."
+    show (EvalSubstitution v) = "Couldn't substitute using {\n" ++ showVars v ++ "}."
+    show (EvalUnconsumed v) = "Incomplete substitution, {\n" ++ showVars v ++ "}."
     show EvalAmbiguous = "Non-determinism encountered, successor state is ambiguous."
     show EvalUndefined = "Term or one of its subterms is undefined."
     show EvalBadInitial= "Cannot construct a non-halting term, perhaps you forgot to declare a halting state?"
@@ -404,9 +417,49 @@ instance Show EvalStatus where
     show EvalCorrupt   = "Unexpected internal error..."
 
 
-combineEvals :: [(EvalStatus, a)] -> (EvalStatus, [a])
-combineEvals [] = (EvalOk, [])
-combineEvals es = first maximum $ unzip es
+data EvalStack' t a = EvalSuccess a
+                    | EvalStack (Maybe a) [(EvalStatus, t)]
+type EvalStack = EvalStack' [Context] [Context]
+
+instance (Show t, Show a) => Show (EvalStack' t [a]) where
+  show (EvalSuccess x) = showSp x
+  show (EvalStack x e) = "Evaluation Error:\n" ++ indent 2 (concatMap go e) ++ go' x
+    where go (m,y) = show m ++ "\n  " ++ show y ++ "\n"
+          go' Nothing = ""
+          go' (Just y) = showSp y
+
+instance Functor (EvalStack' t) where
+  f `fmap` EvalSuccess x = EvalSuccess (f x)
+  f `fmap` EvalStack x s = EvalStack (f <$> x) s
+
+instance Applicative (EvalStack' t) where
+  pure = EvalSuccess
+
+  EvalSuccess f <*> EvalSuccess x = EvalSuccess (f x)
+  EvalSuccess f <*> EvalStack x s = EvalStack (f <$> x) s
+  EvalStack f s <*> EvalSuccess x = EvalStack (f <*> pure x) s
+  EvalStack f s <*> EvalStack x t = EvalStack (f <*> x) (s ++ t)
+
+instance Monad (EvalStack' t) where
+  EvalSuccess x >>= f = f x
+  EvalStack x s >>= f = case f <$> x of
+                          Just (EvalSuccess y) -> EvalStack (Just y) s
+                          Just (EvalStack y t) -> EvalStack y (s ++ t)
+                          Nothing              -> EvalStack Nothing s
+
+evalMaybe :: EvalStatus -> t -> Maybe a -> EvalStack' t a
+evalMaybe s t Nothing  = EvalStack Nothing [(s,t)]
+evalMaybe _ _ (Just x) = EvalSuccess x
+
+evalFail :: EvalStatus -> t -> EvalStack' t a
+evalFail s t = EvalStack Nothing [(s,t)]
+
+evalPartial :: EvalStack' t a -> Either t a
+evalPartial (EvalSuccess x)        = Right x
+evalPartial (EvalStack (Just x) _) = Right x
+evalPartial (EvalStack Nothing  s) =
+  case s of (_,t):_ -> Left t
+            _       -> error "evalPartial: all state lost !?"
 
 match :: Program -> [Context] -> [(Int,Int,Strategy)]
 match (Program [])     _ = []
@@ -426,92 +479,89 @@ isHalting (Program (_ : xs)) c = isHalting (Program xs) c
 -- the status output indicates whether or not the computation successfully completed
 -- evaluate requires its input to be in a halting state (i.e. an initial
 --    state) so that it can deterministically pick an execution direction
-evaluate :: Program -> [Context] -> (EvalStatus, [Context])
+evaluate :: Program -> [Context] -> EvalStack
 evaluate _ [Context c [Compound [x, y], z]]
     | x == atomDup && z == termTerm
-        = (EvalOk, [Context c [z, y, Compound [x, y]]])
+        = return [Context c [z, y, Compound [x, y]]]
 evaluate _ [Context c [z, y, Compound [x, y']]]
     | x == atomDup && z == termTerm && y == y'
-        = (EvalOk, [Context c [Compound [x, y], z]])
+        = return [Context c [Compound [x, y], z]]
 evaluate prog entity =
   case partition haltp (match prog entity) of
     (_:_,[_]) -> evaluate' prog (-1) entity
-    (_:_,[])  -> (EvalOk,            entity)
-    (_:_,_)   -> (EvalAmbiguous,     entity)
-    ([],[])   -> (EvalUndefined,     entity)
-    ([],_)    -> (EvalBadInitial,    entity)
+    (_:_,[])  -> return entity
+    (_:_,_)   -> evalFail EvalAmbiguous  entity
+    ([],[])   -> evalFail EvalUndefined  entity
+    ([],_)    -> evalFail EvalBadInitial entity
 
 haltp (_,_,StratHalt _) = True
 haltp _                 = False
 
 -- evaluate' takes a previous strategy (Int) and continues in the same direction
-evaluate' :: Program -> Int -> [Context] -> (EvalStatus, [Context])
+evaluate' :: Program -> Int -> [Context] -> EvalStack
 evaluate' prog prev entity =
   case partition haltp (match prog entity) of
-    (_:_,[])                                -> (EvalOk,        entity)
-    (_,[(m,m',s)])             | m' == prev -> (EvalOk,        entity)
+    (_:_,[])                                -> return entity
+    (_,[(m,m',s)])             | m' == prev -> return entity
                                | otherwise  -> go m s
     ([],[(m,m',s1),(n,n',s2)]) | m' == prev -> go n s2
                                | n' == prev -> go m s1
     (xs,ys)                    | any successor (xs ++ ys)
-                                            -> (EvalAmbiguous, entity)
-    ([],[])                                 -> (EvalStuck,     entity)
-    _                                       -> (EvalCorrupt,   entity)
+                                            -> evalFail EvalAmbiguous entity
+    ([],[])                                 -> evalFail EvalStuck     entity
+    _                                       -> evalFail EvalCorrupt   entity
   where
-    go _ (StratHalt _) = (EvalOk, entity)
-    go n s = case eval prog s entity of
-               Nothing -> (EvalStuck, entity)
-               Just x  -> evaluate' prog n x
+    go _ (StratHalt _) = return entity
+    go n s = eval prog s entity >>= evaluate' prog n
     successor (_,n,_) = n == prev
 
-eval :: Program -> Strategy -> [Context] -> Maybe [Context]
-eval _    (StratHalt _)                 lent = Just lent
+eval :: Program -> Strategy -> [Context] -> EvalStack
+eval _    (StratHalt _)                 lent = pure lent
 eval prog (Strategy lhs rules plan rhs) lent =
   do
-    lvars        <- unify isp lhs lent
-    rvars        <- foldM execute lvars plan'
-    (vars0,rent) <- subAllRun1 prog rvars rhs
-    guard $ M.null vars0
-    return rent
+    lvars <- evalMaybe (EvalUnification lhs) lent $ unify ishp lhs lent
+    rvars <- foldM execute lvars plan'
+    (vars0,rent) <- evalMaybe (EvalSubstitution rvars) rhs $ subAllRun1 prog rvars rhs
+    if M.null vars0 then return rent else EvalStack Nothing [(EvalUnconsumed vars0, rent)]
   where
-    isp = isHalting prog
+    ishp = isHalting prog
     goPlan ridx = let (Context (Var v) patt) = rules ! ridx in (v, patt)
     plan' = map (either2 goPlan) plan
+    cv v p = [Context (Var v) p]
 
     execute mvars (False, (v, patt)) =
-        do (mvars',ent) <- subAllRun prog mvars patt
-           return $ M.insert v (Compound ent) mvars'
+      do (mvars',ent) <- evalMaybe (EvalSubstitution mvars) (cv v patt)
+                       $ subAllRun prog mvars patt
+         return $ M.insert v (Compound ent) mvars'
     execute mvars (True,  (v, patt)) =
-        subAll mvars (Var v) >>= \case
-            (mvars', Compound ent) -> unify isp patt ent >>= mapMergeDisjoint mvars'
-            _                      -> Nothing
+      do (mvars',t)   <- evalMaybe EvalCorrupt (cv v patt) $ subAll mvars (Var v)
+         case t of
+            Compound ent -> evalMaybe (EvalUnification $ cv v patt) (cv v ent) $ unify ishp patt ent >>= mapMergeDisjoint mvars'
+            _ -> EvalStack Nothing [(EvalCorrupt, cv v [t])]
 
-evaluateRec :: Program -> [Context] -> (EvalStatus, [Context])
-evaluateRec prog = combineEvals . map goc
+evaluateRec :: Program -> [Context] -> EvalStack
+evaluateRec prog = mapM goc
   where
-    goc (Context c ent) = case go (Compound ent) of
-                            (e, Compound ent') -> (e,           Context c ent')
-                            _                  -> (EvalCorrupt, Context c ent)
+    goc (Context c ent) = go (Compound ent) >>= \case
+                            Compound ent' -> return $ Context c ent'
+                            t            -> evalFail EvalCorrupt [Context c [t]]
 
-    go (Compound ts) = Compound <$>
-                       case combineEvals $ map go ts of
-                         (EvalOk,ts') -> evaluateLocal prog ts'
-                         (e,ts')      -> (e, ts')
-    go x@(Asymm _ _) = (EvalMalformed, x)
-    go x             = (EvalOk, x)
+    go (Compound ts) = Compound <$> (mapM go ts >>= evaluateLocal prog)
+    go x@(Asymm _ _) = evalFail EvalMalformed [Context (Var "") [x]]
+    go x             = return x
 
-evaluateLocal :: Program -> [Term] -> (EvalStatus, [Term])
-evaluateLocal prog ts =
-    let c = phony "<|local|>" in
-    case evaluate prog [Context c ts] of
-        (e, [Context c' ts']) | c == c'   -> (e,           ts')
-                              | otherwise -> (EvalCorrupt, ts')
-        _                                 -> (EvalMulti,   ts)
+evaluateLocal' :: ([Context] -> EvalStack) -> [Term] -> EvalStack' [Context] [Term]
+evaluateLocal' eval' ts =
+    let c = phony "<|local|>"
+        x = [Context c ts]
+    in eval' x >>= \case
+        r@[Context c' ts'] | c == c'   -> return ts'
+                           | otherwise -> evalFail EvalCorrupt r
+        _                              -> evalFail EvalMulti   x
 
-evaluateRecLocal :: Program -> [Term] -> (EvalStatus, [Term])
-evaluateRecLocal prog ts =
-    let c = phony "<|local|>" in
-    case evaluateRec prog [Context c ts] of
-        (e, [Context c' ts']) | c == c'   -> (e,           ts')
-                              | otherwise -> (EvalCorrupt, ts')
-        _                                 -> (EvalMulti,   ts)
+
+evaluateLocal :: Program -> [Term] -> EvalStack' [Context] [Term]
+evaluateLocal = evaluateLocal' . evaluate
+
+evaluateRecLocal :: Program -> [Term] -> EvalStack' [Context] [Term]
+evaluateRecLocal = evaluateLocal' . evaluateRec
