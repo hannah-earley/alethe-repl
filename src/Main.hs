@@ -23,13 +23,13 @@ data Env = Env { program  :: Program
 
 main :: IO ()
 main = do files <- getArgs
-          evalStateT (load files >> runInputT defaultSettings (withInterrupt loop))
+          evalStateT (load files >> runInputT defaultSettings loop)
                      Env { program = Program [], sources = [], bindings = M.empty }
 
 type EnvIO = StateT Env IO
 
 loop :: InputT EnvIO ()
-loop = handleInterrupt loop $
+loop = handleInterrupt (withInterrupt loop) $
        getInputReq >>= \case
          Left e     -> outputStrLn (show e) >> loop
          Right Quit -> outputStrLn "bye."
