@@ -38,10 +38,11 @@ prelude' = [QQ.r|
 
 -- main interface
 
-data Term = Atom     Integer String
-          | Var      String
-          | Asymm    Term Term
-          | Compound [Term]
+data Term = Atom      Integer String
+          | Var       String
+          | Asymm     Term Term
+          | Compound  [Term]
+          | Internal_ String
           deriving (Eq,Ord)
 
 data Definition = Terminus [Term]
@@ -62,6 +63,7 @@ instance Show Term where
     show (Var v)      = v
     show (Asymm l r)  = "(" ++ show l ++ " ! " ++ show r ++ ")"
     show (Compound t) = showComp t
+    show (Internal_ t)= "<|" ++ t ++ "|>"
 
 instance Show Definition where
     show (Terminus t)         = "! " ++ showSp t ++ ";"
@@ -265,15 +267,17 @@ instance (Show a, Kappa a) => Kappa [a] where
 instance Kappa Term where
     asplit = liftM2 (,) termLeft termRight
 
-    vars' (Atom _ _)  = M.empty
-    vars' (Var v)     = M.singleton v 1
-    vars' (Asymm l r) = M.unionWith  max (vars' l) (vars' r)
-    vars' (Compound t)= vars' t
+    vars' (Atom _ _)    = M.empty
+    vars' (Var v)       = M.singleton v 1
+    vars' (Asymm l r)   = M.unionWith  max (vars' l) (vars' r)
+    vars' (Compound t)  = vars' t
+    vars' (Internal_ _) = M.empty
 
-    vars (Atom _ _)  = S.empty
-    vars (Var v)     = S.singleton v
-    vars (Asymm l r) = S.union (vars l) (vars r)
-    vars (Compound t)= vars t
+    vars (Atom _ _)    = S.empty
+    vars (Var v)       = S.singleton v
+    vars (Asymm l r)   = S.union (vars l) (vars r)
+    vars (Compound t)  = vars t
+    vars (Internal_ _) = S.empty
 
     unify _ a@(Atom _ _) b@(Atom _ _) = guard (a == b) $> M.empty
     unify _ (Var v)      t            = return $ M.singleton v t
@@ -285,31 +289,35 @@ instance Kappa Term where
     unifyDup p (Compound s) (Compound t) = guard (p t) >> unifyDup p s t
     unifyDup _ _            _            = Nothing
 
-    sub m a@(Atom _ _) = (m,a)
-    sub m (Var v)      = case m M.!? v of
-                           Just x  -> (M.delete v m, x)
-                           Nothing -> (m, Var v)
-    sub m (Asymm l r)  = let (m1,l') = sub m l
-                             (m2,r') = sub m r
-                         in (m1 `M.union` m2, Asymm l' r')
-    sub m (Compound t) = Compound <$> sub m t
+    sub m a@(Atom _ _)    = (m,a)
+    sub m (Var v)         = case m M.!? v of
+                              Just x  -> (M.delete v m, x)
+                              Nothing -> (m, Var v)
+    sub m (Asymm l r)     = let (m1,l') = sub m l
+                                (m2,r') = sub m r
+                            in (m1 `M.union` m2, Asymm l' r')
+    sub m (Compound t)    = Compound <$> sub m t
+    sub m x@(Internal_ _) = (m,x)
 
-    subAll m a@(Atom _ _) = Just (m,a)
-    subAll m (Var v)      = (M.delete v m,) <$> m M.!? v
-    subAll _ (Asymm _ _)  = Nothing -- asymm's have no right being here!
-    subAll m (Compound t) = fmap Compound <$> subAll m t
+    subAll m a@(Atom _ _)    = Just (m,a)
+    subAll m (Var v)         = (M.delete v m,) <$> m M.!? v
+    subAll _ (Asymm _ _)     = Nothing -- asymm's have no right being here!
+    subAll m (Compound t)    = fmap Compound <$> subAll m t
+    subAll m x@(Internal_ _) = Just (m,x)
 
-    subAllDup _ a@(Atom _ _) = return a
-    subAllDup m (Var v)      = maybe (Left [v]) return $ m M.!? v
-    subAllDup _ (Asymm _ _)  = Left []
-    subAllDup m (Compound t) = Compound <$> subAllDup m t
+    subAllDup _ a@(Atom _ _)    = return a
+    subAllDup m (Var v)         = maybe (Left [v]) return $ m M.!? v
+    subAllDup _ (Asymm _ _)     = Left []
+    subAllDup m (Compound t)    = Compound <$> subAllDup m t
+    subAllDup _ x@(Internal_ _) = return x
 
-    subAllRun _    m a@(Atom _ _) = return (m,a)
-    subAllRun _    m (Var v)      = case m M.!? v of
-                                      Just t  -> return (M.delete v m, t)
-                                      Nothing -> evalFail' (EvalSubstitution m) [Var v]
-    subAllRun _    _ t@(Asymm _ _)= evalFail' EvalMalformed [t]
-    subAllRun prog m (Compound t) = fmap Compound <$> subAllRun prog m t
+    subAllRun _    m a@(Atom _ _)    = return (m,a)
+    subAllRun _    m (Var v)         = case m M.!? v of
+                                         Just t  -> return (M.delete v m, t)
+                                         Nothing -> evalFail' (EvalSubstitution m) [Var v]
+    subAllRun _    _ t@(Asymm _ _)   = evalFail' EvalMalformed [t]
+    subAllRun prog m (Compound t)    = fmap Compound <$> subAllRun prog m t
+    subAllRun _    m x@(Internal_ _) = return (m,x)
 
     evaluate = evaluateLocal' . evaluate
 
@@ -359,7 +367,10 @@ instance Kappa Context where
 -- compilation
 
     -- (curr label, inverse label, stratagem)
-newtype Program = Program [(Int,Int,Strategy)]
+data Program = Program { _progRaw :: [(Int,Int,Strategy)]
+                       , _progIdx :: [Context] -> [(Int,Int,Strategy)] }
+
+emptyProgram = Program [] (const [])
 
 data Strategy = StratHalt [Term]
               | Strategy { _stLPatt :: [Context]
@@ -384,7 +395,7 @@ showStratHead l r =
         Nothing -> "> " ++ showRuleHead l r
 
 instance Show Program where
-    show (Program xs) = showMany "\n" xs
+    show (Program xs _) = showMany "\n" xs
 
 instance Show CompilationError where
     show (ParseError e) = "Parse error!: " ++ show e
@@ -458,22 +469,16 @@ evalMaybe _ _ (Just x) = EvalSuccess x
 
 evalFail :: EvalStatus -> t -> EvalStack' t a
 evalFail s t = EvalFail [(s,t)]
-evalFail' s = evalFail s . pure . Context (Var "??")
+evalFail' s = evalFail s . pure . Context (Internal_ "??")
 
 match :: Program -> [Context] -> [(Int,Int,Strategy)]
-match (Program [])     _ = []
-match (Program (x@(_,_,x'):xs)) c =
-    let rest = match (Program xs) c
-    in case x' of
-        StratHalt p       | compatible [p] (map _cTerm c) -> x : rest
-        Strategy  p _ _ _ | compatible  p  c              -> x : rest
-        _                                                 ->     rest
+match (Program _ idx) t = idx t
 
 isHalting :: Program -> [Term] -> Bool
-isHalting (Program []) _       = False
-isHalting (Program ((_,_,StratHalt x) : _)) c
-    | compatible x c           = True
-isHalting (Program (_ : xs)) c = isHalting (Program xs) c
+isHalting p t = any isSH $ match p [Context (Internal_ "") t]
+  where
+    isSH (_,_,StratHalt _) = True
+    isSH _                 = False
 
 -- the status output indicates whether or not the computation successfully completed
 -- evaluate requires its input to be in a halting state (i.e. an initial
@@ -554,7 +559,7 @@ evaluateRec prog = mapM goc
 
 evaluateLocal' :: ([Context] -> EvalStack) -> [Term] -> EvalStack' [Context] [Term]
 evaluateLocal' eval' ts =
-    let c = phony "<|local|>"
+    let c = Internal_ "local"
         x = [Context c ts]
     in eval' x >>= \case
         r@[Context c' ts'] | c == c'   -> return ts'

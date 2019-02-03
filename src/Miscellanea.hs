@@ -1,5 +1,7 @@
 module Miscellanea where
 
+import Data.Function (on)
+import Control.Arrow (first)
 import Control.Monad (liftM2,guard)
 import Control.Applicative ((<$))
 import System.FilePath.Posix (normalise, (</>))
@@ -7,7 +9,7 @@ import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as M
 import Data.Heap (Entry(..))
 import qualified Data.Heap as H
-import Data.List (nub,intercalate)
+import Data.List (nub,intercalate,groupBy,sortBy)
 import Data.Either (partitionEithers)
 
 data Extended a = NegInfinite | Finite a | PosInfinite
@@ -126,3 +128,8 @@ mapMergeEq m n = M.foldrWithKey go (Just m) n
 either2 :: (a -> b) -> Either a a -> (Bool, b)
 either2 f (Left  x) = (False, f x)
 either2 f (Right x) = (True,  f x)
+
+multibag :: Ord s => [(s,t)] -> [(s,[t])]
+multibag = map (first head . unzip)
+            . groupBy ((==) `on` fst)
+            . sortBy (compare `on` fst)
