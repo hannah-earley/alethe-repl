@@ -15,6 +15,8 @@ import Control.Monad (liftM2, foldM, guard)
 import qualified Text.Parsec.Error as PE
 import qualified Text.RawString.QQ as QQ
 
+import Debug.Trace (trace)
+
 import Miscellanea
 
 -- prelude
@@ -99,7 +101,7 @@ showAtom 0 a = showAtom' a
 showAtom n a = "#~" ++ show n ++ ":" ++ if invalidAtom a then show a else a
 
 showComp t = let c = Compound t in
-             case catMaybes [show <$> nat' c, show <$> str' c, sexpr' c] of
+             case catMaybes [garbage' t, show <$> nat' c, show <$> str' c, sexpr' c] of
                (x:_) -> x
                []    -> "(" ++ showSp t ++ ")"
 
@@ -137,6 +139,7 @@ atomCons = atom "Cons"
 atomDup = atom "Dup"
 atomPlus = atom "Plus"
 atomMinus = atom "Minus"
+atomGarbage = atom "Garbage"
 atomChar c = atom ['\'', c]
 
 nats = iterate (\n -> Compound [atomSucc, n]) atomZero
@@ -145,6 +148,9 @@ cons car cdr = Compound [atomCons, car, cdr]
 sexpr = flip $ foldr cons
 slist = foldr cons atomNil
 str = slist . map atomChar
+
+garbage' (x:_) | x == atomGarbage = Just "{~GARBAGE~}"
+garbage' _                        = Nothing
 
 nat' (Compound [x,y]) | x == atomSucc = (1+) <$> nat' y
 nat' a                | a == atomZero = Just (0 :: Integer)
@@ -196,10 +202,20 @@ class Kappa a where
     sub :: Map String Term -> a -> (Map String Term, a)
     subAll :: Map String Term -> a -> Maybe (Map String Term, a)
     subAllDup :: Map String Term -> a -> Either [String] a
-    subAllRun :: Program -> Map String Term -> a -> Maybe (Map String Term, a)
-    evalPL :: Program -> [a] -> [a]
+    subAllRun :: Program -> Map String Term -> a
+                         -> EvalStack' [Context] (Map String Term, a)
+    evaluate :: Program -> [a] -> EvalStack' [Context] [a]
 
     compatible :: a -> a -> Bool
+
+-- =
+
+subAllRun1 :: Kappa a => Program -> Map String Term -> [a]
+                                 -> EvalStack' [Context] (Map String Term, [a])
+subAllRun1 _    m []     = do return (m, [])
+subAllRun1 prog m (x:xs) = do (m', x')  <- subAllRun  prog m  x
+                              (m'',xs') <- subAllRun1 prog m' xs
+                              return (m'', x':xs')
 
 showVars :: Map String Term -> String
 showVars = concatMap go . M.toList
@@ -238,17 +254,12 @@ instance (Show a, Kappa a) => Kappa [a] where
     subAllDup m = mapLeft concat . combineEithers . map (subAllDup m)
 
     subAllRun prog m xs = do (m',xs') <- subAllRun1 prog m xs
-                             return (m', evalPL prog xs')
+                             xs''     <- evaluate prog xs'
+                             return (m', xs'')
 
-    evalPL = map . evalPL
+    evaluate = mapM . evaluate
 
     compatible xs ys = maybe False (all $ uncurry compatible) $ zipStrict xs ys
-
-subAllRun1 :: Kappa a => Program -> Map String Term -> [a] -> Maybe (Map String Term, [a])
-subAllRun1 _    m []     = do return (m, [])
-subAllRun1 prog m (x:xs) = do (m',x') <- subAllRun prog m x
-                              (m'',xs') <- subAllRun1 prog m' xs
-                              return (m'', x':xs')
 
 instance Kappa Term where
     asplit = liftM2 (,) termLeft termRight
@@ -292,16 +303,14 @@ instance Kappa Term where
     subAllDup _ (Asymm _ _)  = Left []
     subAllDup m (Compound t) = Compound <$> subAllDup m t
 
-    subAllRun _    m a@(Atom _ _) = Just (m,a)
-    subAllRun _    m (Var v)      = (M.delete v m,) <$> m M.!? v
-    subAllRun _    _ (Asymm _ _)  = Nothing -- asymm's have no right being here!
+    subAllRun _    m a@(Atom _ _) = return (m,a)
+    subAllRun _    m (Var v)      = case m M.!? v of
+                                      Just t  -> return (M.delete v m, t)
+                                      Nothing -> evalFail' (EvalSubstitution m) [Var v]
+    subAllRun _    _ t@(Asymm _ _)= evalFail' EvalMalformed [t]
     subAllRun prog m (Compound t) = fmap Compound <$> subAllRun prog m t
 
-    evalPL prog t = case evalPartial (evaluateLocal prog t) of
-                      Left [Context _ x] -> x
-                      Left [] -> error "evalPL: all state lost !?"
-                      Left _ -> error "evalPL: multiparty unsupported"
-                      Right x -> x
+    evaluate = evaluateLocal' . evaluate
 
     compatible (Var _)      _             = True
     compatible _            (Var _)       = True
@@ -336,13 +345,13 @@ instance Kappa Context where
       where go (c':p') = Context c' p'
             go []      = undefined
 
-    subAllRun prog m (Context v@(Var _) p) = let (m',v') = sub m v
-                                             in fmap (Context v') <$> subAllRun1 prog m' p
-    subAllRun prog m (Context c p)         = do (m',c') <- subAll m c
-                                                (m'',p') <- subAllRun1 prog m' p
-                                                return (m'', Context c' p')
+    subAllRun prog m (Context v@(Var _) p) =
+      let (m',v') = sub m v in fmap (Context v') <$> subAllRun1 prog m' p
+    subAllRun prog m x@(Context c p) =
+      do (m',c') <- evalMaybe (EvalSubstitution m) [x] $ subAll m c
+         fmap (Context c') <$> subAllRun1 prog m' p
 
-    evalPL prog = snd . either2 id . evalPartial . evaluate prog
+    evaluate = evaluateContext
 
     compatible (Context c1 p1) (Context c2 p2) = compatible c1 c2 && compatible p1 p2
 
@@ -453,9 +462,11 @@ evalMaybe _ _ (Just x) = EvalSuccess x
 
 evalFail :: EvalStatus -> t -> EvalStack' t a
 evalFail s t = EvalStack Nothing [(s,t)]
+evalFail' s = evalFail s . pure . Context (Var "??")
 
-evalPartial :: EvalStack' t a -> Either t a
+evalPartial :: (Show t, Show a) => EvalStack' t [a] -> Either t [a]
 evalPartial (EvalSuccess x)        = Right x
+evalPartial v | trace ("ep: " ++ show v) False = undefined
 evalPartial (EvalStack (Just x) _) = Right x
 evalPartial (EvalStack Nothing  s) =
   case s of (_,t):_ -> Left t
@@ -479,14 +490,14 @@ isHalting (Program (_ : xs)) c = isHalting (Program xs) c
 -- the status output indicates whether or not the computation successfully completed
 -- evaluate requires its input to be in a halting state (i.e. an initial
 --    state) so that it can deterministically pick an execution direction
-evaluate :: Program -> [Context] -> EvalStack
-evaluate _ [Context c [Compound [x, y], z]]
+evaluateContext :: Program -> [Context] -> EvalStack
+evaluateContext _ [Context c [Compound [x, y], z]]
     | x == atomDup && z == termTerm
         = return [Context c [z, y, Compound [x, y]]]
-evaluate _ [Context c [z, y, Compound [x, y']]]
+evaluateContext _ [Context c [z, y, Compound [x, y']]]
     | x == atomDup && z == termTerm && y == y'
         = return [Context c [Compound [x, y], z]]
-evaluate prog entity =
+evaluateContext prog entity =
   case partition haltp (match prog entity) of
     (_:_,[_]) -> evaluate' prog (-1) entity
     (_:_,[])  -> return entity
@@ -516,12 +527,14 @@ evaluate' prog prev entity =
     successor (_,n,_) = n == prev
 
 eval :: Program -> Strategy -> [Context] -> EvalStack
+-- eval _ s e | trace ("eval: " ++ show (s,e)) False = undefined
 eval _    (StratHalt _)                 lent = pure lent
 eval prog (Strategy lhs rules plan rhs) lent =
   do
     lvars <- evalMaybe (EvalUnification lhs) lent $ unify ishp lhs lent
     rvars <- foldM execute lvars plan'
-    (vars0,rent) <- evalMaybe (EvalSubstitution rvars) rhs $ subAllRun1 prog rvars rhs
+    (vars0,rent) <- subAllRun1 prog rvars rhs
+    -- trace ("eval': " ++ show (lent,rent)) $
     if M.null vars0 then return rent else EvalStack Nothing [(EvalUnconsumed vars0, rent)]
   where
     ishp = isHalting prog
@@ -529,14 +542,15 @@ eval prog (Strategy lhs rules plan rhs) lent =
     plan' = map (either2 goPlan) plan
     cv v p = [Context (Var v) p]
 
+    -- execute v c | trace ("evalx: " ++ show(lent,v,c)) False = undefined
     execute mvars (False, (v, patt)) =
-      do (mvars',ent) <- evalMaybe (EvalSubstitution mvars) (cv v patt)
-                       $ subAllRun prog mvars patt
+      do (mvars',ent) <- subAllRun prog mvars patt
          return $ M.insert v (Compound ent) mvars'
     execute mvars (True,  (v, patt)) =
       do (mvars',t)   <- evalMaybe EvalCorrupt (cv v patt) $ subAll mvars (Var v)
          case t of
-            Compound ent -> evalMaybe (EvalUnification $ cv v patt) (cv v ent) $ unify ishp patt ent >>= mapMergeDisjoint mvars'
+            Compound ent -> evalMaybe (EvalUnification $ cv v patt) (cv v ent)
+                          $ unify ishp patt ent >>= mapMergeDisjoint mvars'
             _ -> EvalStack Nothing [(EvalCorrupt, cv v [t])]
 
 evaluateRec :: Program -> [Context] -> EvalStack
@@ -546,7 +560,7 @@ evaluateRec prog = mapM goc
                             Compound ent' -> return $ Context c ent'
                             t            -> evalFail EvalCorrupt [Context c [t]]
 
-    go (Compound ts) = Compound <$> (mapM go ts >>= evaluateLocal prog)
+    go (Compound ts) = Compound <$> (mapM go ts >>= evaluate prog)
     go x@(Asymm _ _) = evalFail EvalMalformed [Context (Var "") [x]]
     go x             = return x
 
@@ -558,10 +572,6 @@ evaluateLocal' eval' ts =
         r@[Context c' ts'] | c == c'   -> return ts'
                            | otherwise -> evalFail EvalCorrupt r
         _                              -> evalFail EvalMulti   x
-
-
-evaluateLocal :: Program -> [Term] -> EvalStack' [Context] [Term]
-evaluateLocal = evaluateLocal' . evaluate
 
 evaluateRecLocal :: Program -> [Term] -> EvalStack' [Context] [Term]
 evaluateRecLocal = evaluateLocal' . evaluateRec
