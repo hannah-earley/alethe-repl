@@ -15,9 +15,10 @@ import Control.Monad (liftM2, foldM, guard)
 import qualified Text.Parsec.Error as PE
 import qualified Text.RawString.QQ as QQ
 
-import Debug.Trace (trace)
-
 import Miscellanea
+
+-- import Debug.Trace (trace)
+trace _ x = x
 
 -- prelude
 
@@ -427,50 +428,37 @@ instance Show EvalStatus where
 
 
 data EvalStack' t a = EvalSuccess a
-                    | EvalStack (Maybe a) [(EvalStatus, t)]
+                    | EvalFail    [(EvalStatus, t)]
 type EvalStack = EvalStack' [Context] [Context]
 
 instance (Show t, Show a) => Show (EvalStack' t [a]) where
   show (EvalSuccess x) = showSp x
-  show (EvalStack x e) = "Evaluation Error:\n" ++ indent 2 (concatMap go e) ++ go' x
-    where go (m,y) = show m ++ "\n  " ++ show y ++ "\n"
-          go' Nothing = ""
-          go' (Just y) = showSp y
+  show (EvalFail    e) = "Evaluation Error:" ++ indent 2 (concatMap go e)
+    where go (m,y) = "\n" ++ show m ++ "\n  " ++ show y
 
 instance Functor (EvalStack' t) where
   f `fmap` EvalSuccess x = EvalSuccess (f x)
-  f `fmap` EvalStack x s = EvalStack (f <$> x) s
+  _ `fmap` EvalFail    s = EvalFail    s
 
 instance Applicative (EvalStack' t) where
   pure = EvalSuccess
 
   EvalSuccess f <*> EvalSuccess x = EvalSuccess (f x)
-  EvalSuccess f <*> EvalStack x s = EvalStack (f <$> x) s
-  EvalStack f s <*> EvalSuccess x = EvalStack (f <*> pure x) s
-  EvalStack f s <*> EvalStack x t = EvalStack (f <*> x) (s ++ t)
+  EvalSuccess _ <*> EvalFail    s = EvalFail    s
+  EvalFail    s <*> EvalSuccess _ = EvalFail    s
+  EvalFail    s <*> EvalFail    t = EvalFail    (s ++ t)
 
 instance Monad (EvalStack' t) where
   EvalSuccess x >>= f = f x
-  EvalStack x s >>= f = case f <$> x of
-                          Just (EvalSuccess y) -> EvalStack (Just y) s
-                          Just (EvalStack y t) -> EvalStack y (s ++ t)
-                          Nothing              -> EvalStack Nothing s
+  EvalFail    s >>= _ = EvalFail s
 
 evalMaybe :: EvalStatus -> t -> Maybe a -> EvalStack' t a
-evalMaybe s t Nothing  = EvalStack Nothing [(s,t)]
+evalMaybe s t Nothing  = evalFail s t
 evalMaybe _ _ (Just x) = EvalSuccess x
 
 evalFail :: EvalStatus -> t -> EvalStack' t a
-evalFail s t = EvalStack Nothing [(s,t)]
+evalFail s t = EvalFail [(s,t)]
 evalFail' s = evalFail s . pure . Context (Var "??")
-
-evalPartial :: (Show t, Show a) => EvalStack' t [a] -> Either t [a]
-evalPartial (EvalSuccess x)        = Right x
-evalPartial v | trace ("ep: " ++ show v) False = undefined
-evalPartial (EvalStack (Just x) _) = Right x
-evalPartial (EvalStack Nothing  s) =
-  case s of (_,t):_ -> Left t
-            _       -> error "evalPartial: all state lost !?"
 
 match :: Program -> [Context] -> [(Int,Int,Strategy)]
 match (Program [])     _ = []
@@ -535,7 +523,7 @@ eval prog (Strategy lhs rules plan rhs) lent =
     rvars <- foldM execute lvars plan'
     (vars0,rent) <- subAllRun1 prog rvars rhs
     -- trace ("eval': " ++ show (lent,rent)) $
-    if M.null vars0 then return rent else EvalStack Nothing [(EvalUnconsumed vars0, rent)]
+    if M.null vars0 then return rent else evalFail (EvalUnconsumed vars0) rent
   where
     ishp = isHalting prog
     goPlan ridx = let (Context (Var v) patt) = rules ! ridx in (v, patt)
@@ -551,7 +539,7 @@ eval prog (Strategy lhs rules plan rhs) lent =
          case t of
             Compound ent -> evalMaybe (EvalUnification $ cv v patt) (cv v ent)
                           $ unify ishp patt ent >>= mapMergeDisjoint mvars'
-            _ -> EvalStack Nothing [(EvalCorrupt, cv v [t])]
+            _ -> evalFail EvalCorrupt (cv v [t])
 
 evaluateRec :: Program -> [Context] -> EvalStack
 evaluateRec prog = mapM goc
