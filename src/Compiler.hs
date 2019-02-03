@@ -6,6 +6,7 @@ import Miscellanea
 
 import Data.Set (Set)
 import qualified Data.Set as S
+import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as M
 import Data.Vector ((!))
 import qualified Data.Vector as V
@@ -24,7 +25,10 @@ compile0 :: [FilePath] -> IO (Either CompilationError Program)
 compile0 = compWith []
 
 compile' :: [Definition] -> Either CompilationError Program
-compile' ds = fmap Program $ cVar ds >> cAmbi ds >> tgSolves (ds)
+compile' ds = fmap mkProg $ cVar ds >> cAmbi ds >> tgSolves (ds)
+
+mkProg :: [(Int,Int,Strategy)] -> Program
+mkProg xs = Program xs (searchIndexProg $ buildIndexProg xs)
 
 -- phase 1: variable conflict and context scope checks
 
@@ -111,3 +115,93 @@ tgSolves = mapLeft ReversibilityError . fmap concat . combineEithers . go [0..]
     go ns (d:ds) = case tgSolve ns d of
                      Nothing        -> Left d   : go ns  ds
                      Just (xs, ns') -> Right xs : go ns' ds
+
+-- phase 4: fast lookups
+
+buildIndexProg :: [(Int,Int,Strategy)] -> IndexCtxt (Int,Int,Strategy)
+buildIndexProg xs = buildIndexCtxt . catMaybes $ zipWith f xs xs
+  where
+    emp = Context (Var "")
+    f (_,_,StratHalt ts)       s = Just (emp ts, s)
+    f (_,_,Strategy [x] _ _ _) s = Just (x,      s)
+    f _                        _ = Nothing
+      -- we don't support multiparty rules yet, see the below comment
+      -- for a sketch of what to do when we do...
+
+searchIndexProg :: IndexCtxt (Int,Int,Strategy) -> [Context] -> [(Int,Int,Strategy)]
+searchIndexProg idx [c] = searchIndexCtxt idx c
+searchIndexProg _   _   = []
+
+{- IndexCtxts is tricky as it needs to match a subset of the input in any order. I.e, if we search for a strategy consistent with a current set of terms [A,B,C,D], then we can match rules like [D,A,B], [C,B], etc but not [A,C,D,E] etc. We therefore map each input to a tuple (n,i,v); to be consistent, we must obtain (n,0,v), (n,1,v), ..., (n,n-1,v). We should then also indicate which terms in the input matched. -}
+data IndexCtxts v = IndexCtxts (IndexCtxt (Int,Int,v)) deriving Show
+buildIndexCtxts :: [([Context],v)] -> IndexCtxts v
+buildIndexCtxts = error "not yet defined!"
+
+data IndexCtxt v = IndexCtxt (IndexTerms v) deriving Show
+
+data IndexTerm v = IndexTerm { _idxAtom :: Map Integer (Map String [v])
+                             , _idxVar  :: [v]
+                             , _idxIntl :: Map String [v]
+                             , _idxComp :: IndexTerms v
+                             } deriving (Show)
+
+data IndexTerms v = IndexTerms (Map Int (IndexTerms' v)) deriving Show
+
+data IndexTerms' v = IndexCar (IndexTerm (IndexTerms' v))
+                   | IndexCdr [v]
+                   deriving (Show)
+
+buildIndexCtxt :: [(Context,v)] -> IndexCtxt v
+buildIndexCtxt = IndexCtxt . buildIndexTerms . map (\(Context c x,v) -> (c:x,v))
+
+searchIndexCtxt :: IndexCtxt v -> Context -> [v]
+searchIndexCtxt (IndexCtxt idx) (Context c x) = searchIndexTerms idx (c:x)
+
+buildIndexTerm :: [(Term,v)] -> IndexTerm v
+buildIndexTerm ts = IndexTerm atIdx vaIdx inIdx coIdx
+  where
+    f g = catMaybes $ map g ts
+    getAt (Atom n x,b)    = Just (n,(x,b)); getAt _ = Nothing; ats = f getAt
+    getVa (Var v,b)       = Just (v    ,b); getVa _ = Nothing; vas = f getVa
+    getCo (Compound xs,b) = Just (xs   ,b); getCo _ = Nothing; cos'= f getCo
+    getIn (Internal_ x,b) = Just (x    ,b); getIn _ = Nothing; ins = f getIn
+    -- getAs (Asymm l r,b)   = Just ((l,r),b); getAs _ = Nothing; ass = f getAs
+    -- we shouldn't have any asymms to match against as these should be split in tgSolves
+
+    atIdx = M.fromList . map (fmap $ M.fromList . multibag) $ multibag ats
+    vaIdx = map snd vas
+    inIdx = M.fromList $ multibag ins
+    coIdx = buildIndexTerms cos'
+
+searchIndexTerm :: IndexTerm v -> Term -> [v]
+searchIndexTerm (IndexTerm a v _ _) (Atom n x) =
+  v ++ maybe [] id (a M.!? n >>= (M.!? x))
+searchIndexTerm (IndexTerm _ v i _) (Internal_ x) =
+  v ++ maybe [] id (i M.!? x)
+searchIndexTerm (IndexTerm _ v _ c) (Compound ts) =
+  v ++ searchIndexTerms c ts
+searchIndexTerm _ _ = error "searchIndexTerm: error! asymm or var found in concrete term."
+
+buildIndexTerms :: [([Term],v)] -> IndexTerms v
+buildIndexTerms ts = IndexTerms . M.fromList . map gogo
+                                . multibag $ zip (map (length . fst) ts) ts
+  where
+    gogo (n,xs) = (n,go n xs)
+
+    go 0 = IndexCdr . map snd
+    go n = IndexCar . buildIndexTerm
+                . map (fmap $ go (n-1))
+                . multibag . map f
+
+    f (x:xs, b) = (x,(xs,b))
+    f _         = error "buildIndexTerms: internal error"
+
+searchIndexTerms :: IndexTerms v -> [Term] -> [v]
+searchIndexTerms (IndexTerms m) ts =
+  maybe [] (flip searchIndexTerms' ts) $ m M.!? length ts
+
+searchIndexTerms' :: IndexTerms' v -> [Term] -> [v]
+searchIndexTerms' (IndexCdr vs) [] = vs
+searchIndexTerms' (IndexCar idx) (t:ts) =
+  concatMap (flip searchIndexTerms' ts) $ searchIndexTerm idx t
+searchIndexTerms' _ _ = []

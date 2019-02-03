@@ -23,13 +23,13 @@ data Env = Env { program  :: Program
 
 main :: IO ()
 main = do files <- getArgs
-          evalStateT (load files >> runInputT defaultSettings loop)
-                     Env { program = Program [], sources = [], bindings = M.empty }
+          evalStateT (load files >> runInputT defaultSettings (withInterrupt loop))
+                     Env { program = emptyProgram, sources = [], bindings = M.empty }
 
 type EnvIO = StateT Env IO
 
 loop :: InputT EnvIO ()
-loop = handleInterrupt (withInterrupt loop) $
+loop = handleInterrupt loop $
        getInputReq >>= \case
          Left e     -> outputStrLn (show e) >> loop
          Right Quit -> outputStrLn "bye."
@@ -71,7 +71,7 @@ goMatch p t = do progr <- program <$> get
   where go binds' = modify $ \e -> e { bindings = binds' `M.union` bindings e }
 
 load :: [FilePath] -> EnvIO ()
-load files = do modify $ \e -> e { program = Program [], sources = files }
+load files = do modify $ \e -> e { program = emptyProgram, sources = files }
                 liftIO (compile files) >>= \case
                     Left  e -> liftIO . putStrLn $ show e
                     Right p -> modify (\e -> e { program = p })
