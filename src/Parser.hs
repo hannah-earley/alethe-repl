@@ -321,6 +321,7 @@ data Request = EvaluateOpen   [Term]
              | Noop
              | ShowVars
              | ShowProg
+             | ShowGarbage [String]
              deriving (Show)
 
 rule :: Monad m => Parser m Request
@@ -335,13 +336,14 @@ rule = (EvaluateOpen <$> ruleOpen) <|> (uncurry EvaluateClosed <$> ruleClosed)
                                 , [termTerm] ++ rhs ++ [op] )
 
 cmd :: Monad m => Parser m Request
-cmd = char ':' >> (quit <|> reload <|> load <|> showv <|> showp)
+cmd = char ':' >> (quit <|> reload <|> load <|> showv <|> showp <|> showg)
   where
     quit = Quit <$ symbol "q" <?> "quit (:q)"
     reload = Reload <$ symbol "r" <?> "reload (:r)"
     load = symbol "l" >> Load <$> many file <?> "load (:l file1 ...)"
     showv = ShowVars <$ symbol "v" <?> "list variables (:v)"
     showp = ShowProg <$ symbol "p" <?> "show program (:p)"
+    showg = ShowGarbage <$> (symbol "g" >> many identifier) <?> "show garbage (:g var1 ...)"
     file = stringLiteral <|> lexeme (many1 . satisfy $ not . nonVisible)
 
 

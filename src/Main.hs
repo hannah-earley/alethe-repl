@@ -44,6 +44,7 @@ switch (EvaluateOpen t)     = void $ goEval t
 switch (EvaluateClosed t p) = goEval t >>= maybe (return ()) (goMatch p)
 switch ShowVars             = get >>= liftIO . printVars . bindings
 switch ShowProg             = get >>= liftIO . print . program
+switch (ShowGarbage vs)     = get >>= liftIO . putStr . showGarb vs . bindings 
 switch _                    = undefined
 
 printVars :: Map String Term -> IO ()
@@ -75,3 +76,9 @@ load files = do modify $ \e -> e { program = emptyProgram, sources = files }
                 liftIO (compile files) >>= \case
                     Left  e -> liftIO . putStrLn $ show e
                     Right p -> modify (\e -> e { program = p })
+
+showGarb :: [String] -> Map String Term -> String
+showGarb vs bs = concatMap go vs
+  where go v = "  " ++ v ++ " -> " ++ case bs M.!? v of
+                  Just x  -> show (unveilGarbage x) ++ "\n"
+                  Nothing -> "<|UNDEFINED|>"
