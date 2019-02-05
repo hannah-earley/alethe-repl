@@ -155,6 +155,8 @@ str = slist . map atomChar
 garbage' (x:_) | x == atomGarbage = Just "{~GARBAGE~}"
 garbage' _                        = Nothing
 
+unveilGarbage = replaceXwithYinZ atomGarbage (Var "Garbage")
+
 nat' (Compound [x,y]) | x == atomSucc = (1+) <$> nat' y
 nat' a                | a == atomZero = Just (0 :: Integer)
 nat' _                                = Nothing
@@ -207,8 +209,10 @@ class Kappa a where
     subAllDup :: Map String Term -> a -> Either [String] a
     subAllRun :: Program -> Map String Term -> a
                          -> EvalStack' [Context] (Map String Term, a)
-    evaluate :: Program -> [a] -> EvalStack' [Context] [a]
 
+    replaceXwithYinZ :: Term -> Term -> a -> a
+
+    evaluate :: Program -> [a] -> EvalStack' [Context] [a]
     compatible :: a -> a -> Bool
 
 -- =
@@ -259,6 +263,8 @@ instance (Show a, Kappa a) => Kappa [a] where
     subAllRun prog m xs = do (m',xs') <- subAllRun1 prog m xs
                              xs''     <- evaluate prog xs'
                              return (m', xs'')
+
+    replaceXwithYinZ x y z = map (replaceXwithYinZ x y) z
 
     evaluate = mapM . evaluate
 
@@ -319,6 +325,11 @@ instance Kappa Term where
     subAllRun prog m (Compound t)    = fmap Compound <$> subAllRun prog m t
     subAllRun _    m x@(Internal_ _) = return (m,x)
 
+    replaceXwithYinZ x y z | x == z = y
+    replaceXwithYinZ x y (Compound t) = Compound (replaceXwithYinZ x y t)
+    replaceXwithYinZ x y (Asymm l r) = Asymm (replaceXwithYinZ x y l) (replaceXwithYinZ x y r)
+    replaceXwithYinZ _ _ z = z
+
     evaluate = evaluateLocal' . evaluate
 
     compatible (Var _)      _             = True
@@ -359,6 +370,8 @@ instance Kappa Context where
     subAllRun prog m x@(Context c p) =
       do (m',c') <- evalMaybe (EvalSubstitution m) [x] $ subAll m c
          fmap (Context c') <$> subAllRun1 prog m' p
+
+    replaceXwithYinZ x y (Context c p) = Context (replaceXwithYinZ x y c) (replaceXwithYinZ x y p)
 
     evaluate = evaluateContext
 
