@@ -183,7 +183,7 @@ termRight (Asymm l _) = l
 termRight (Compound t) = Compound $ map termRight t
 termRight x = x
 
-class Kappa a where
+class Alethe a where
     asplit :: a -> (a,a)
 
     vars' :: a -> Map String Int
@@ -217,7 +217,7 @@ class Kappa a where
 
 -- =
 
-subAllRun1 :: Kappa a => Program -> Map String Term -> [a]
+subAllRun1 :: Alethe a => Program -> Map String Term -> [a]
                                  -> EvalStack' [Context] (Map String Term, [a])
 subAllRun1 _    m []     = do return (m, [])
 subAllRun1 prog m (x:xs) = do (m', x')  <- subAllRun  prog m  x
@@ -228,7 +228,7 @@ showVars :: Map String Term -> String
 showVars = concatMap go . M.toList
   where go (v,x) = "  " ++ v ++ " -> " ++ show x ++ "\n"
 
-varsplit :: Kappa a => a -> (Set String, a, a)
+varsplit :: Alethe a => a -> (Set String, a, a)
 varsplit t = let (l,r) = asplit t in (vars t, l, r)
 
 zipStrict :: [a] -> [b] -> Maybe [(a,b)]
@@ -236,7 +236,7 @@ zipStrict []     []     = Just []
 zipStrict (x:xs) (y:ys) = (:) (x,y) <$> zipStrict xs ys
 zipStrict _      _      = Nothing
 
-instance (Show a, Kappa a) => Kappa [a] where
+instance (Show a, Alethe a) => Alethe [a] where
     asplit = unzip . map asplit
 
     vars' = M.unionsWith (+) . map vars'
@@ -270,7 +270,7 @@ instance (Show a, Kappa a) => Kappa [a] where
 
     compatible xs ys = maybe False (all $ uncurry compatible) $ zipStrict xs ys
 
-instance Kappa Term where
+instance Alethe Term where
     asplit = liftM2 (,) termLeft termRight
 
     vars' (Atom _ _)    = M.empty
@@ -340,7 +340,7 @@ instance Kappa Term where
     compatible (Compound s) (Compound t)  = compatible s t
     compatible _            _             = False
 
-instance Kappa Context where
+instance Alethe Context where
     asplit (Context c p) = let (c1,c2) = asplit c
                                (p1,p2) = asplit p
                            in (Context c1 p1, Context c2 p2)
