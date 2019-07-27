@@ -28,14 +28,14 @@ import Miscellanea
 
 -- lexing and tokens
 
-lexer = T.makeTokenParser kappaStyle
-kappaStyle = haskellStyle
+lexer = T.makeTokenParser aletheStyle
+aletheStyle = haskellStyle
                { T.reservedNames   = [ "import", "data", "_", "=" ]
                , T.reservedOpNames = [ "=" ]
                , T.identStart      = nota reservedIdStart
                , T.identLetter     = nota reservedIdLetter
                , T.opStart         = nota reservedOpStart
-               , T.opLetter        = T.identLetter kappaStyle }
+               , T.opLetter        = T.identLetter aletheStyle }
   where nota p = satisfy $ not . p
 
 identifier    = T.identifier    lexer
@@ -122,7 +122,7 @@ kleene alpha = [reverse (x:xs) | xs <- [] : kleene alpha, x <- alpha]
 
 -- parsing
 
-idRaw = lexeme $ many (T.identLetter kappaStyle)
+idRaw = lexeme $ many (T.identLetter aletheStyle)
 idQual = stringLiteral <|> idRaw
 notop = try . option () $ operator >>= unexpected . ("operator " ++) . show
 opScoped = liftM2 Atom sid idQual
