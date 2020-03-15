@@ -1,3 +1,5 @@
 dist
 dist-*
 .ghc.environment.*
+alethe
+.DS_Store
