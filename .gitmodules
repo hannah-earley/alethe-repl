@@ -1,0 +1,3 @@
+[submodule "alf"]
+	path = alf
+	url = https://github.com/wearley/alethe-examples.git
