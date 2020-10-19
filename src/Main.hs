@@ -6,8 +6,6 @@ import System.Console.Haskeline
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as M
 import Control.Monad.State.Strict
-import Control.Monad.Trans (lift)
-import Control.Monad (void)
 
 import Language
 import Parser

@@ -15,8 +15,11 @@ import Data.List (nub)
 import Data.Maybe (catMaybes)
 import Data.Either (partitionEithers)
 
+compWith' :: [Definition] -> Either CompilationError [Definition] -> Either CompilationError Program
+compWith' prel = (>>= compile') . fmap (prel++)
+
 compWith :: [Definition] -> [FilePath] -> IO (Either CompilationError Program)
-compWith prel ps = loadPrograms ps >>= return . (compile' . (prel++) =<<)
+compWith prel = fmap (compWith' prel) . loadPrograms
 
 compile :: [FilePath] -> IO (Either CompilationError Program)
 compile = compWith prelude

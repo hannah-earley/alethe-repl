@@ -7,7 +7,6 @@ import Text.Parsec.Language (haskellStyle)
 import Data.Either (partitionEithers)
 import Data.Tuple (swap)
 
-import Control.Applicative ((<*), (<$))
 import Control.Monad (liftM2,liftM3,ap,join)
 import Control.Monad.Trans (liftIO)
 import Control.Exception (bracket)
