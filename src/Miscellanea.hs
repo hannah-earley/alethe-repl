@@ -3,7 +3,6 @@ module Miscellanea where
 import Data.Function (on)
 import Control.Arrow (first)
 import Control.Monad (liftM2,guard)
-import Control.Applicative ((<$))
 import System.FilePath.Posix (normalise, (</>))
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as M
