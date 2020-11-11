@@ -59,7 +59,10 @@ cAmbi defs = handle . map (vdefs !) . nub . concatMap triangles $ halts ++ rules
         triangles (l,c) = case promisc $ filter (p (l,c)) rules of
                             [] -> []
                             ls -> l:ls
-
+        -- above: first, filter rules for all which are compatible with (l,c),
+        -- below: then see if any of _these_ rules are compatible with each
+        --        other; if so, then we have found a triangle and can report
+        --        it as an ambiguity
         promisc [] = []
         promisc ((l,c):xs) = case filter (compatible c . snd) xs of
                                [] -> promisc xs
@@ -73,7 +76,21 @@ partitionContexts = (concat *** concat) . partitionEithers . zipWith f [0..]
 
 -- phase 3: resolving implementation paths
 -- tg = transition graph
-
+--
+-- A transition graph has as nodes sets of variables (Set String), and its edges
+-- are directed, are labelled by the sub-rule that maps between these sets of variables,
+-- and are weighted by the cost annotation.
+--
+-- A sub-rule is a declaration c:p with context c and term pattern p; if these are
+-- uniquely labelled by Ints, n, then Left n means the consumption of p_n and production
+-- of c_n (i.e. instantiation of the sub-term) whilst Right n means the converse (i.e.
+-- consumption of the sub-term).
+--
+-- tgBuild takes an ordered list of declarations, and some initial nodes (typically the
+-- variable set for the left side of the main rule, and the set for the right side), and
+-- constructs a term graph by transitively applying the declarations from the initial nodes,
+-- walking as far as possible. Clearly we want to be able to get from the left node to the
+-- right node, and if such a path does not exist then we will fail at the next step...
 tgBuild :: [Declaration] -> [Set String] -> [(Set String, [(Either Int Int, Int, Set String)])]
 tgBuild rules = build S.empty . S.fromList
   where
@@ -97,11 +114,15 @@ tgBuild rules = build S.empty . S.fromList
         assocs = map (\n -> (n,walk n)) $ S.elems from
         next = S.unions (map (es2ns . snd) assocs) S.\\ visited
         assocs' = build (visited `S.union` from) next
-
+-- now we try to solve for paths from the left node to the right node (and vice-versa);
+-- first we handle the trivially satisfied case of halting states,
 tgSolve :: [l] -> Definition -> Maybe ([(l,l,Strategy)],[l])
 tgSolve (x:y:zs) (Terminus t) = case asplit t of
     (l,r) | l == r    -> Just ([(x,x,StratHalt l)],(y:zs))
           | otherwise -> Just ([(x,y,StratHalt l), (y,x,StratHalt r)],zs)
+-- then the interesting case of computational rules, in which we build the transition graph
+-- and then apply dijkstra's algorithm to obtain a path of minimal cost between the left and
+-- right nodes (nl and nr), or else fail
 tgSolve (x:y:zs) (Rule l r d) =
   do (_,pl1) <- dijkstra (M.fromList $ tgBuild d [nl,nr]) nl nr
      let pl2 = reverse $ map flipEither pl1
@@ -110,7 +131,7 @@ tgSolve (x:y:zs) (Rule l r d) =
         (nr,l2,r1) = varsplit r
         vc = V.fromList $ map _decRule d
 tgSolve _ _ = Nothing
-
+-- finally, solve for _all_ rules, and report which rules (if any) fail
 tgSolves :: [Definition] -> Either CompilationError [(Int,Int,Strategy)]
 tgSolves = mapLeft ReversibilityError . fmap concat . combineEithers . go [0..]
   where
@@ -119,7 +140,7 @@ tgSolves = mapLeft ReversibilityError . fmap concat . combineEithers . go [0..]
                      Nothing        -> Left d   : go ns  ds
                      Just (xs, ns') -> Right xs : go ns' ds
 
--- phase 4: fast lookups
+-- phase 4: fast pattern lookups by building a trie-like structure...
 
 buildIndexProg :: [(Int,Int,Strategy)] -> IndexCtxt (Int,Int,Strategy)
 buildIndexProg xs = buildIndexCtxt . catMaybes $ zipWith f xs xs
