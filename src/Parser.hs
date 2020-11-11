@@ -225,7 +225,7 @@ defn :: Monad m => Parser m [Definition]
 defn = decl >>= either (const $ unexpected "declaration") return . sequence
 
 imprt :: Parser IO [Definition]
-imprt = reserved "import" >> stringLiteral >>= subParse
+imprt = reserved "import" *> stringLiteral <* semi >>= subParse
 
 datum :: Monad m => Parser m [Definition]
 datum = reserved "data" >> datum' <$> (opterms <* semi)
