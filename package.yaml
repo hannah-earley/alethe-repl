@@ -1,0 +1,34 @@
+name:                alethe
+version:             0.1.0.0
+github:              "hannah-earley/alethe-repl"
+license:             BSD-3-Clause
+author:              "Hannah Earley"
+maintainer:          "h@nnah.io"
+copyright:           "2020 Hannah Earley"
+
+#extra-source-files:
+
+synopsis:            Interpreter for alethe
+#category:            
+#description:         
+
+dependencies:
+- base >= 4.7 && < 5
+- parsec
+- mtl
+- containers
+- unix
+- directory
+- filepath
+- array
+- vector
+- heaps
+- template-haskell
+- raw-strings-qq
+- haskeline
+
+executable:
+  source-dirs: src
+  main: Main.hs
+  ghc-options: -Wall -Wno-missing-signatures -O3
+  default-extensions:  FlexibleContexts, TupleSections, LambdaCase, NoMonomorphismRestriction
