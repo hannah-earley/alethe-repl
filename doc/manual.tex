@@ -1,0 +1,229 @@
+\documentclass[a4paper]{scrartcl}
+
+  \usepackage{microtype}
+  \usepackage[utf8]{inputenc}
+  \usepackage[greek,british]{babel}
+  \babeltags{gr=greek}
+  \usepackage{geometry}
+  \renewcommand{\rmdefault}{ptm}
+  \renewcommand{\ttdefault}{lmtt}
+  \usepackage[scaled]{helvet}
+  \usepackage{calligra}
+  \usepackage{scalerel}
+  \usepackage{amsmath}
+  \usepackage{amssymb}
+  \usepackage{caption}
+  \usepackage{newfloat}
+  \usepackage[backend=biber,sorting=none]{biblatex}
+  \usepackage[dvipsnames]{xcolor}
+  \usepackage{graphicx}
+  \usepackage[colorlinks=true]{hyperref}
+  \usepackage[noabbrev]{cleveref}
+  \colorlet{myorange}{YellowOrange!90!black}
+  \colorlet{myblue}{Aquamarine!90!black}
+  \colorlet{mypurple}{violet!90!black}
+  \hypersetup{
+    linkcolor = mypurple,
+    citecolor = myblue,
+    urlcolor = myorange,
+    colorlinks = true,
+  }
+  \DeclareFloatingEnvironment{listing}
+  \DeclareCaptionSubType{listing}
+  \crefname{listing}{listing}{listings}
+  \Crefname{listing}{Listing}{Listings}
+
+  \def\textAleph{{\ensuremath\aleph}}
+  \def\alethe{\texttt{alethe}}
+  \def\ruleName#1{\textsc{\small({#1})}}
+  \def\bnfPrim#1{\ensuremath{\textsc{\small{#1}}}}
+  \def\atom#1{\ensuremath{\textsc{\small{#1}}}}
+  \def\Z{\atom{Z}}\def\S{\atom{S}}
+  \def\Cons{\atom{Cons}}\def\Nil{\atom{Nil}}
+  \def\unit{(\hspace{-0.3ex})}
+  \def\blank{\underline{~~}}
+  \def\infix#1{{{}^{\backprime}{#1}{}^{\backprime}}}
+  \def\dataDef#1{{\operatorname{data}}~{#1}}
+
+  \makeatletter
+    \newcommand{\atomLocal}[2][1]{\begingroup%
+      \newcount\atomLocal@count%
+      \atomLocal@count=#1%
+      \loop\advance\atomLocal@count-1%
+        {\sim}%
+      \ifnum\atomLocal@count>0%
+        \hspace{-0.65ex}%
+        \repeat%
+      \textsc{\small #2}%
+    \endgroup}
+  \makeatother
+
+  \def\cmtMLopen{\{\hspace{-0.4ex}\raisebox{0.07ex}{-}}%
+  \def\cmtMLcont{\phantom{\cmtMLopen}}%
+  \def\cmtMLclose{\raisebox{0.07ex}{-}\hspace{-0.4ex}\}}%
+  \def\cmtSLopen{\cmtMLcont\llap{-{}-}}%
+  \long\def\comment#1{\textit{\small#1}}%
+
+  \makeatletter
+  \newsavebox{\slant@box}
+  \newsavebox{\cursiveS@box}
+  \newsavebox{\cursiveS@raw}
+  \newcommand{\slantbox}[2][.5]{\mbox{\sbox{\slant@box}{#2}%
+          \hskip\wd\slant@box\pdfsave
+          \pdfsetmatrix{1 0 #1 1}%
+          \llap{\usebox{\slant@box}}%
+          \pdfrestore}}
+  \sbox{\cursiveS@box}{%
+    \hspace{-0.343ex}\slantbox[-0.23]{\raisebox{0.35ex}{\hstretch{0.65}{\vstretch{0.3}{/}}}}%
+    \hspace{-0.6ex}\slantbox[-.27]{\hstretch{1.1}{\vstretch{1.55}{\text{\calligra s}}}}}
+  \sbox{\cursiveS@raw}{%
+    \slantbox[-.27]{\hstretch{1.1}{\vstretch{1.55}{\text{\calligra s}}}}}
+  \def\cursiveS{\usebox{\cursiveS@box}}
+  \def\cursiveSraw{\usebox{\cursiveS@raw}}
+  \makeatother
+
+  \def\cursivefS{{f\kern-0.6ex\cursiveSraw}}
+  \def\cursivehS{{h\kern0.11ex\cursiveS}}
+  \def\cursivelS{{\ell\kern0.12ex\cursiveS}}
+  \def\cursivenS{{n\kern0.11ex\cursiveS}}
+  \def\cursivetS{{t\kern0.06ex\cursiveS}}
+  \def\cursivevS{{v\kern-0.3ex\cursiveSraw}}
+  \def\cursivewS{{w\kern-0.3ex\cursiveSraw}}
+  \def\cursivexS{{x\cursiveS}}
+  \def\cursiveyS{{y\kern-0.03ex\cursiveS}}
+  \def\cursivezS{{z\cursiveS}}
+  \def\cursiveSS{\cursiveS\kern-0.15ex\cursiveSraw}
+  \def\cursivexSS{{x\cursiveSS}}
+  \def\cursiveySS{{y\kern-0.03ex\cursiveSS}}
+
+  \title{\alethe}
+  \author{William Earley\thanks{w.earley@damtp.cam.ac.uk}}
+
+  \begin{filecontents}{bib.bib}
+    @article{aleph,
+      title={The \textAleph\ Calculus},
+      subtitle={A declarative model of reversible programming with relevance to Brownian computers},
+      author={Earley, William},
+      archivePrefix = "arXiv",
+      % primaryClass  = "",
+      % eprint        = "",
+      year={2020}
+    }
+  \end{filecontents}
+  \addbibresource{bib.bib}
+
+\begin{document}
+\maketitle
+
+\noindent\emph{This reference document is a work in progress. Currently it will only make sense if you have first read the paper~\cite{aleph} on \textAleph.}
+
+\newpage
+\section{\alethe}
+
+For clarity and convenience, we have introduced a number of syntactic shorthands. We now summarise and extend this sugar to construct a programming language, \alethe, the definition of which is given in \Cref{lst:alethe-dfn}. We proceed by desugaring each form in turn.
+
+\begin{listing}\centering
+\fbox{\begin{minipage}{0.9\textwidth}\vspace{\baselineskip}\begin{equation*}\begin{aligned}
+    \ruleName{pattern term} && \tau &::= \alpha ~|~ \bnfPrim{var} ~|~ (\,\tau^*\,) ~|~ \sigma \\
+    \ruleName{atom} && \alpha &::= \bnfPrim{atom} ~|~ \sim\alpha ~|~ \#{}^{\backprime\backprime}\,\bnfPrim{char}^\ast\,'' ~|~ \#\alpha \\
+    \ruleName{value} && \sigma &::= \mathbb{N} ~|~ {}^{\backprime\backprime}\, \bnfPrim{char}^\ast \,'' ~|~ [\,\tau^\ast\,] ~|~ [\, \tau^+ \,.\, \tau \,] ~|~ \blank \\
+    \ruleName{party} && \pi &::= \tau:\tau^\ast ~|~ \bnfPrim{var}':\tau^\ast \\
+    \ruleName{parties} && \Pi &::= \pi ~|~ \Pi\,;\,\pi \\
+    \ruleName{relation} && \rho &::= \tau^\ast=\tau^\ast ~|~ \tau^\ast~{}^\backprime\tau^\ast{}^\prime~\tau^\ast \\
+    \ruleName{definition head} && \delta_h &::= \rho ~|~ \{\,\Pi\,\}=\{\,\Pi\,\} \\
+    \ruleName{definition rule} && \delta_r &::= \delta_h \,; ~|~ \delta_h\!: \Delta^+ \\
+    \ruleName{definition halt} && \delta_t &::=~ !\,\tau^\ast; ~|~ !\,\rho\,; \\
+    \ruleName{definition} && \delta &::= \delta_r ~|~ \delta_t \\
+    \ruleName{cost annotation} && \xi &::= .^\ast \\
+    \ruleName{declaration} && \Delta &::= \delta ~|~ \pi\,.\xi ~|~ \rho\,.\xi ~|~ !\,\rho\,.\xi \\
+    \ruleName{statement} && \Sigma &::= \delta ~|~ \dataDef{\tau^\ast}; ~|~ \operatorname{import}~ {}^{\backprime\backprime}\bnfPrim{module path}''; \\
+    \ruleName{program} && \mathcal P &::= \Sigma^\ast
+\end{aligned}\end{equation*}\vspace{\baselineskip}\end{minipage}}
+  \caption{Definition of \alethe\ syntax.}
+  \label{lst:alethe-dfn}
+\end{listing}
+
+\begin{listing}
+  \centering
+  \begingroup%
+  \def\nl{\\[1.5em]}%
+  \begin{align*}
+    & \cursivexS~\infix{\atom{InsertionSort}~{p}}~{\cursivenS'}~\cursiveyS{:} \\
+    &\qquad \phantom{!}~\cursivenS~\infix{\atom{Reverse}}~{\cursivenS'}{.} \\
+    &\qquad {!}~\atomLocal{Go}~{p}~\cursivexS~{[]}~{[]} =
+                \atomLocal{Go}~{p}~\cursivexS~{[{n}~{\cdot}~\cursivenS]}~{\cursiveyS'}{.} \\
+    &\qquad \phantom{!}~
+            \atomLocal{Go}~{p}~{[{x}~{\cdot}~\cursivexS]}~\cursivenS~\cursiveyS = 
+            \atomLocal{Go}~{p}~\cursivexS~{[{n}~{\cdot}~{\cursivenS'}]}~{\cursiveyS'}{:} \\
+    &\qquad\qquad {x}~\cursiveyS~\infix{\atom{Insert}~{p}}~{n}~{\cursiveyS'}{.} \\
+    &\qquad\qquad \cursivenS~\infix{\atom{Map}~{(\atomLocal{Go}~{n})}}~{\cursivenS'}{.} \\
+    &\qquad\qquad {m}~\infix{\atomLocal{Go}~{n}}~{m'}{:} \\
+    &\qquad\qquad\qquad \infix{{<}~{m}~{n}}~{b}{.} \\
+    &\qquad\qquad\qquad \infix{{<}~{m'}~{n}}~{b}{.} \\
+    &\qquad\qquad\qquad {m}~\infix{\atomLocal[2]{}~{b}}~{m'}{.} \\
+    &\qquad\qquad {m}~\infix{\atomLocal{}~\atom{True}}~{m}{;} \\
+    &\qquad\qquad {m}~\infix{\atomLocal{}~\atom{False}}~{(\S{m})}{;}
+    \nl
+    & \comment{\cmtSLopen~this is a comment.} \\
+    & \comment{\cmtMLopen~so is this;}\\
+    & \comment{\cmtMLcont~the following definition reverses a list:~\cmtMLclose} \\
+    & \cursivexS~\infix{\atom{Reverse}}~\cursiveyS{:} \\
+    &\qquad {!}~\atomLocal{Go}~\cursivexS~{[]} = \atomLocal{Go}~{[]}~\cursiveyS{.} \\
+    &\qquad\phantom{!}~\atomLocal{Go}~{[{x}~{\cdot}~\cursivexS]}~\cursiveyS =
+                       \atomLocal{Go}~\cursivexS~{[{x}~{\cdot}~\cursiveyS]}{;}
+  \end{align*}
+  \fbox{\begin{minipage}{.95\textwidth}\vspace{-0.2em}\begin{align*}
+    & {[77~2~42~68~41~36~8~36]}~\infix{\atom{InsertionSort}~{<}}~{[7~0~5~6~4~2~1~3]}~{[2~8~36~36~41~42~68~77]}{.}
+  \end{align*}\vspace{-0.8em}\end{minipage}}%
+  \endgroup
+  \captionsetup{singlelinecheck=off}
+  \def\cap{The \textAleph\ implementation of insertion sort from the standard library, making use of nested locally scoped definitions. Whilst sorting must necessarily generate `garbage' data, this definition aims to yield useful `garbage' data in that $\cursivenS'$ contains the permutation which maps $\cursivexS$ to $\cursiveyS$, as shown in the boxed example. Specifically, this corresponds to the following permutation (in standard notation):}
+  \caption[\cap]{\cap
+    \begin{equation*}\begin{pmatrix}
+      0 & 1 & 2 & 3 & 4 & 5 & 6 & 7 \\
+      7 & 0 & 5 & 6 & 4 & 2 & 1 & 3
+    \end{pmatrix}.\end{equation*}}
+  \label{lst:ex-sort2}
+\end{listing}
+
+{\def\ir#1{\item[\ruleName{#1}]}\begin{itemize}
+  \ir{patt.\ term} The definition of a pattern term only differs from its definition in \textAleph\ by the inclusion of sugared values, $\sigma$.
+  \ir{atom} Atoms are fundamentally the same as in \textAleph, but there are four ways of inputting an atom. If the name of an atom begins with an uppercase letter or a symbol, then it can be typed directly. In fact, any string of non-reserved and non-whitespace characters that does not begin with a lowercase letter (as defined by Unicode) qualifies as an atom; if it does begin with a lowercase letter, it qualifies as a variable. If one wishes to use an atom name that does not follow this rule, one can use the form $\#{}^{\backprime\backprime}\,\bnfPrim{char}^\ast\,''$, where $\bnfPrim{char}^\ast$ is any string (using \texttt{Haskell}-style character escapes if needed). Additionally you can prefix a symbol with $\#$ to suppress its interpretation as a relation (e.g.\ $\#+$). Finally, if an atom is prefixed with some number of tildes then it is locally scoped: that is, you can nest rule definitions and make these unavailable outside their scope, and you can refer to locally scoped atoms in outer scopes by using more tildes (there is no scope inheritance). You can even use an empty atom name if preceded by a tilde, which can be useful for introducing anonymous definitions. Example code using this sugar is given in \Cref{lst:ex-sort2}.
+  \ir{value} The sugar here for natural numbers ($\mathbb N$) and lists is familiar from earlier, but there are two additional sugared value types: strings\footnote{Once again, using \texttt{Haskell}-style character escapes if needed}, which are lists of character atoms where the character atom for, e.g., \texttt{c} is \texttt{'c}, and units, which can be inserted with $\blank$ instead of $\unit$.
+  \ir{party} Parties are the same as in raw \textAleph. Note, however, that the reference interpreter of \alethe\ has no separate representation for opaque variables: if the context is a variable, then it is assumed to be opaque rather than the variable pattern. When concurrency and contextual evaluation is supported in a future version, this deficiency will need to be addressed.
+  \ir{parties} Bags of parties are delimited by semicolons.
+  \ir{relation} Relations are shorthand for where there is a single, variable context. These are familiar from the previous examples.
+  \ir{def.\ head} A rule is either a relation, or a mapping between party-bags which are enclosed in braces.
+  \ir{def.\ rule} If a rule has no sub-rules, then it is followed by a semicolon, otherwise it is followed by a colon and then its sub-rules/any locally scoped rules. These declarations must either be in the same line, or should be indented more than the rule head similar to \texttt{Haskell}'s off-side rule or \texttt{python}'s block syntax.
+  \ir{def.\ halt} As well as the canonical halting pattern form, there is also sugar for a relation wherein both sides of the relation each beget a halting pattern, as does the infix term (if any).
+  \ir{def.} This is the same as for \textAleph.
+  \ir{cost ann.} Sub-rules can be followed by more than one full-stop, for reasons that will be explained later in this section.
+  \ir{decl.} In addition to the party sub-rules present in \textAleph, there are three sugared forms. If a declaration is a definition then, after introducing and resolving fresh anonymous names for any locally scoped atoms, the behaviour is the same as if the definition was written in the global scope. If a declaration takes the form of a relation, then it is the same as if we introduced a fresh context variable and bound each side of the relation to it. If the relation is preceded by $!$, then it defines both a sub-rule and halting pattern, e.g.
+  \begin{align*}
+    {!}~\atomLocal{Go}~{p}~\cursivexS~{[]}~{[]} =
+        \atomLocal{Go}~{p}~\cursivexS~{[{n}~{\cdot}~\cursivenS]}~{\cursiveyS'}{.}
+  \end{align*}
+  becomes
+  \begin{align*}
+    & {!}~\atomLocal{Go}~{p}~{\cursivexS}~{[]}~{[]}{;} \\
+    & {!}~\atomLocal{Go}~{p}~{\cursivexS}~{[{n}~{\cdot}~{\cursivenS}]}~{\cursiveyS'}{;} \\
+    & \phantom{!}~\atomLocal{Go}~{p}~\cursivexS~{[]}~{[]} =
+            \atomLocal{Go}~{p}~\cursivexS~{[{n}~{\cdot}~\cursivenS]}~{\cursiveyS'}{.}
+  \end{align*}
+  
+  \ir{statement} A statement is a definition, a data definition, or an import statement. A data definition $\dataDef{\S~{n}}{;}$ is simply sugar for
+  \begin{align*}
+    & {!}~{\S}~{n}{;} \\
+    & \infix{\atom{Dup}~({\S}~{n})}~{({\S}~{n'})}{:} \\
+    &\qquad \infix{\atom{Dup}~{n}}~{n'}{.}
+  \end{align*}
+  i.e.\ it marks the pattern as halting and automatically writes a definition of \atom{Dup}. Future versions may automatically write other definitions, such as comparison functions, or include a derivation syntax akin to \texttt{Haskell}'s. The import statement imports all the definitions of the referenced file, as if they were one file, and supports mutual dependency. Future versions may support partial, qualified and renaming import variants.
+  \ir{program} A program is a series of statements.
+\end{itemize}}
+
+\def\midtilde{\raisebox{-0.23em}{\textasciitilde}}
+We also note that the interpreter for \texttt{alethe} treats the atoms \Z, \S, \Cons, \Nil, \atom{Garbage}, and character atoms specially when printing to the terminal. Specifically, they are automatically recognised and printed according to the sugared representations defined above. That is, except for the \atom{Garbage} atom which, when in the first position of a term, hides its contents---rendering as \texttt{\{\midtilde GARBAGE\midtilde\}}. This is useful when working with reversible simulations of irreversible functions that generate copious amounts of garbage data. If one assigns the garbage to a variable, then the special \texttt{:g} directive can be used to inspect its contents. Other directives include \texttt{:q} to quit, \texttt{:l file1 ...} to load the specified files as the current program, \texttt{:r} to reload the current program, \texttt{:v} to list the currently assigned variables after the course of the interpreter session, and \texttt{:p} to show all the loaded rules of the current program (and the derived serialisation strategy for each, see later). Computations can be performed in one of two ways; the first, \texttt{| (+ 3) 4 \raisebox{-0.3em}{-}}, takes as input a halting term, attempts to evaluate it to completion, and returns the output if successful, i.e.\ \texttt{() 7 (+ 3)}. The second, \texttt{> 4 `+ 3` y}, takes a relation as input and attempts to get from one side to the other. For example, here we evaluate \texttt{(+ 3) 4 ()}, obtaining \texttt{() 7 (+ 3)} which we then unify against \texttt{() y (+ 3)}, finally resulting in the variable assignment $y\mapsto7$. To run in the opposite direction, use \texttt{<} instead. Note that, whilst the interpreter does understand concurrent rules, it is not yet able to evaluate them.
+
+\printbibliography
+
+\end{document}
