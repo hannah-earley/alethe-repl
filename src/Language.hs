@@ -1,5 +1,7 @@
 {-# LANGUAGE QuasiQuotes #-}
 {-# LANGUAGE FlexibleInstances #-}
+{-# LANGUAGE RankNTypes #-}
+{-# LANGUAGE ConstraintKinds #-}
 
 module Language where
 
@@ -12,8 +14,11 @@ import Data.Char
 import Data.Maybe (catMaybes)
 import Data.List (intercalate,partition)
 import Control.Monad (liftM2, foldM, guard)
+import Control.Applicative (liftA2)
 import qualified Text.Parsec.Error as PE
 import qualified Text.RawString.QQ as QQ
+import Data.Functor.Identity (runIdentity)
+import Data.Typeable (Typeable)
 
 import Miscellanea
 
@@ -49,12 +54,18 @@ data Definition = Terminus [Term]
                 | Rule { _defLPatt :: [Context]
                        , _defRPatt :: [Context]
                        , _defRules :: [Declaration] }
+                | MagicBinding { _defLPatt :: [Context]
+                               , _defRPatt :: [Context]
+                               , _defMagicName :: String }
+                -- deriving (Eq,Ord)
 
 data Declaration = Declaration { _decWeight :: Int
                                , _decRule   :: Context }
+                   -- deriving (Eq,Ord)
 
 data Context = Context { _cOHC  :: Term
                        , _cTerm :: [Term]}
+               -- deriving (Eq,Ord)
 
 -- display, sugar, properties, etc
 
@@ -68,6 +79,7 @@ instance Show Term where
 instance Show Definition where
     show (Terminus t)         = "! " ++ showSp t ++ ";"
     show (Rule lhs rhs rules) = showRuleHead lhs rhs ++ showRules show rules
+    show (MagicBinding lhs rhs name) = "magic " ++ show name ++ " " ++ showRuleHead lhs rhs ++ ";"
 
 showRuleHead lhs rhs = case ruleInfixP lhs rhs of
                          Just (lhs',op,rhs') ->
@@ -183,6 +195,8 @@ termRight (Asymm l _) = l
 termRight (Compound t) = Compound $ map termRight t
 termRight x = x
 
+type AMConstraint m = (Typeable m, Monad m)
+
 class Alethe a where
     asplit :: a -> (a,a)
 
@@ -209,20 +223,33 @@ class Alethe a where
     subAllDup :: Map String Term -> a -> Either [String] a
     subAllRun :: Program -> Map String Term -> a
                          -> EvalStack' [Context] (Map String Term, a)
+    subAllRunM :: AMConstraint m =>
+                  Program -> Map String Term -> a
+                          -> EvalStackT' m [Context] (Map String Term, a)
+    subAllRun p m = runIdentity . runEvalStackT' . subAllRunM p m
 
     replaceXwithYinZ :: Term -> Term -> a -> a
 
     evaluate :: Program -> [a] -> EvalStack' [Context] [a]
+    evaluateM :: AMConstraint m => Program -> [a] -> EvalStackT' m [Context] [a]
+    evaluate p = runIdentity . runEvalStackT' . evaluateM p
     compatible :: a -> a -> Bool
 
 -- =
 
 subAllRun1 :: Alethe a => Program -> Map String Term -> [a]
-                                 -> EvalStack' [Context] (Map String Term, [a])
-subAllRun1 _    m []     = do return (m, [])
+                                  -> EvalStack' [Context] (Map String Term, [a])
+subAllRun1 _    m []     = return (m, [])
 subAllRun1 prog m (x:xs) = do (m', x')  <- subAllRun  prog m  x
                               (m'',xs') <- subAllRun1 prog m' xs
                               return (m'', x':xs')
+
+subAllRun1M :: (AMConstraint m, Alethe a) => Program -> Map String Term -> [a]
+                                   -> EvalStackT' m [Context] (Map String Term, [a])
+subAllRun1M _    m []     = return (m, [])
+subAllRun1M prog m (x:xs) = do (m', x')  <- subAllRunM  prog m  x
+                               (m'',xs') <- subAllRun1M prog m' xs
+                               return (m'', x':xs')
 
 showVars :: Map String Term -> String
 showVars = concatMap go . M.toList
@@ -264,9 +291,14 @@ instance (Show a, Alethe a) => Alethe [a] where
                              xs''     <- evaluate prog xs'
                              return (m', xs'')
 
+    subAllRunM prog m xs = do (m',xs') <- subAllRun1M prog m xs
+                              xs''     <- evaluateM prog xs'
+                              return (m', xs'')
+
     replaceXwithYinZ x y z = map (replaceXwithYinZ x y) z
 
     evaluate = mapM . evaluate
+    evaluateM = mapM . evaluateM
 
     compatible xs ys = maybe False (all $ uncurry compatible) $ zipStrict xs ys
 
@@ -325,12 +357,21 @@ instance Alethe Term where
     subAllRun prog m (Compound t)    = fmap Compound <$> subAllRun prog m t
     subAllRun _    m x@(Internal_ _) = return (m,x)
 
+    subAllRunM _    m a@(Atom _ _)    = return (m,a)
+    subAllRunM _    m (Var v)         = case m M.!? v of
+                                          Just t  -> return (M.delete v m, t)
+                                          Nothing -> evalFailM' (EvalSubstitution m) [Var v]
+    subAllRunM _    _ t@(Asymm _ _)   = evalFailM' EvalMalformed [t]
+    subAllRunM prog m (Compound t)    = fmap Compound <$> subAllRunM prog m t
+    subAllRunM _    m x@(Internal_ _) = return (m,x)
+
     replaceXwithYinZ x y z | x == z = y
     replaceXwithYinZ x y (Compound t) = Compound (replaceXwithYinZ x y t)
     replaceXwithYinZ x y (Asymm l r) = Asymm (replaceXwithYinZ x y l) (replaceXwithYinZ x y r)
     replaceXwithYinZ _ _ z = z
 
     evaluate = evaluateLocal' . evaluate
+    evaluateM = evaluateLocalM' . evaluateM
 
     compatible (Var _)      _             = True
     compatible _            (Var _)       = True
@@ -371,9 +412,16 @@ instance Alethe Context where
       do (m',c') <- evalMaybe (EvalSubstitution m) [x] $ subAll m c
          fmap (Context c') <$> subAllRun1 prog m' p
 
+    subAllRunM prog m (Context v@(Var _) p) =
+      let (m',v') = sub m v in fmap (Context v') <$> subAllRun1M prog m' p
+    subAllRunM prog m x@(Context c p) =
+      do (m',c') <- evalMaybeM (EvalSubstitution m) [x] $ subAll m c
+         fmap (Context c') <$> subAllRun1M prog m' p
+
     replaceXwithYinZ x y (Context c p) = Context (replaceXwithYinZ x y c) (replaceXwithYinZ x y p)
 
     evaluate = evaluateContext
+    evaluateM = evaluateContextM
 
     compatible (Context c1 p1) (Context c2 p2) = compatible c1 c2 && compatible p1 p2
 
@@ -385,22 +433,51 @@ data Program = Program { _progRaw :: [(Int,Int,Strategy)]
 
 emptyProgram = Program [] (const [])
 
+type MagicExec'' m t = t -> Map String Term -> EvalStackT' m t (Map String Term)
+type MagicExec' m = MagicExec'' m [Context]
+type MagicExec = forall m. AMConstraint m => MagicExec' m
 data Strategy = StratHalt [Term]
               | Strategy { _stLPatt :: [Context]
                          , _stRules :: Vector Context
                          , _stPlan  :: [Either Int Int]
                          , _stRPatt :: [Context] }
+              | StratMagic { _stLPatt :: [Context]
+                           , _stMagicHelp :: String
+                           , _stMagicDo :: MagicExec
+                           , _stRPatt :: [Context] }
 
+-- instance Ord PE.ParseError where
+--   compare x y = compare (show x) (show y)
 data CompilationError = ParseError PE.ParseError
                       | AmbiguityError [Definition]
-                      | ReversibilityError [Definition]
-                      | VarConflictError [Definition]
+                      | ReversibilityError Definition
+                      | VarConflictError Definition
+                      | MagicIncantationError Definition
+                      | UnknownCompilationError String
+                      -- deriving (Eq, Ord)
+
+data CESummary = CESummary { cesPE :: [PE.ParseError]
+                           , cesAE :: [Definition]
+                           , cesRE :: [Definition]
+                           , cesVC :: [Definition]
+                           , cesMI :: [Definition]
+                           , cesUK :: [String] }
+
+sce :: [CompilationError] -> CESummary
+sce [] = CESummary [] [] [] [] [] []
+sce (ParseError e:xs) = let s = sce xs in s { cesPE = e : cesPE s }
+sce (AmbiguityError ds:xs) = let s = sce xs in s { cesAE = ds ++ cesAE s }
+sce (ReversibilityError d:xs) = let s = sce xs in s { cesRE = d : cesRE s }
+sce (VarConflictError d:xs) = let s = sce xs in s { cesVC = d : cesVC s }
+sce (MagicIncantationError d:xs) = let s = sce xs in s { cesMI = d : cesMI s }
+sce (UnknownCompilationError e:xs) = let s = sce xs in s { cesUK = e : cesUK s }
 
 instance Show Strategy where
     show (StratHalt t) = show (Terminus t)
     show (Strategy l d p r) = showStratHead l r ++ showRules showp p
       where showp (Left  n) = "< " ++ show (d ! n) ++ "."
             showp (Right n) = "> " ++ show (d ! n) ++ "."
+    show (StratMagic l h _ r) = showStratHead l r ++ "! " ++ h ++ "."
 
 showStratHead l r =
     case ruleInfixP r l of
@@ -413,15 +490,31 @@ instance Show Program where
 instance Show CompilationError where
     show (ParseError e) = "Parse error!: " ++ show e
     show (AmbiguityError d) = "Non-determinism detected within the following rules:" ++ showErrDefs d
-    show (ReversibilityError d) = "Couldn't find a reversible execution plan for the following:" ++ showErrDefs d
-    show (VarConflictError d) = "Conflicting variables in the following:" ++ showErrDefs d
+    show (ReversibilityError d) = "Couldn't find a reversible execution plan for the following:" ++ showErrDefs [d]
+    show (VarConflictError d) = "Conflicting variables in the following:" ++ showErrDefs [d]
+    show (MagicIncantationError d) = "Unknown magical incantation in the following:" ++ showErrDefs [d]
+    show (UnknownCompilationError e) = e
+
+instance Show CESummary where
+  show (CESummary p a r v m u) = unlines $ concat $
+      [ f p $ "Parse error(s)!: " ++ errMulti (map show p)
+      , f a $ "Non-determinism detected within the following rules:" ++ showErrDefs a
+      , f r $ "Couldn't find a reversible execution plan for the following:" ++ showErrDefs r
+      , f v $ "Conflicting variables in the following:" ++ showErrDefs v
+      , f m $ "Unknown magical incantation in the following:" ++ showErrDefs m
+      , f u $ errMulti u
+      ]
+    where f x s = if length x > 0 then [s] else []
 
 stripChildren :: Definition -> Definition
-stripChildren (Terminus t) = Terminus (t)
 stripChildren (Rule l r _) = Rule l r []
+stripChildren d = d
+
+errMulti :: [String] -> String
+errMulti = concatMap ("\n    "++)
 
 showErrDefs :: [Definition] -> String
-showErrDefs = concatMap (("\n    "++) . show . stripChildren)
+showErrDefs = errMulti . map (show . stripChildren)
 
 -- evaluation
 
@@ -436,6 +529,9 @@ data EvalStatus = EvalOk
                 | EvalMalformed
                 | EvalMulti
                 | EvalCorrupt
+                | EvalNonMonadic
+                | EvalWrongMonad
+                | EvalOther String
 
 instance Show EvalStatus where
     show EvalOk        = "Evaluation successfully halted."
@@ -449,11 +545,19 @@ instance Show EvalStatus where
     show EvalMalformed = "Malformed input, perhaps an unexpected variable or asymmetry."
     show EvalMulti     = "Multiple parties encountered, this is not supported."
     show EvalCorrupt   = "Unexpected internal error..."
+    show EvalNonMonadic = "Attempting to evaluate monadic rule in non monadic context (likely cause: magic rule)"
+    show EvalWrongMonad = "Attempting to evaluate monadic rule in wrong monadic context (likely cause: magic rule requiring IO)"
+    show (EvalOther e) = e
 
 
 data EvalStack' t a = EvalSuccess a
                     | EvalFail    [(EvalStatus, t)]
+newtype EvalStackT' m t a = EvalStackT' { runEvalStackT' :: m (EvalStack' t a) }
 type EvalStack = EvalStack' [Context] [Context]
+type EvalStackT m = EvalStackT' m [Context] [Context]
+
+liftEval :: Monad m => m a -> EvalStackT' m t a
+liftEval m = EvalStackT' $ pure <$> m
 
 instance (Show t, Show a) => Show (EvalStack' t [a]) where
   show (EvalSuccess x) = showSp x
@@ -476,6 +580,22 @@ instance Monad (EvalStack' t) where
   EvalSuccess x >>= f = f x
   EvalFail    s >>= _ = EvalFail s
 
+instance Functor m => Functor (EvalStackT' m t) where
+  fmap f = EvalStackT' . fmap (fmap f) . runEvalStackT'
+
+instance Applicative m => Applicative (EvalStackT' m t) where
+  pure = EvalStackT' . pure . EvalSuccess
+  liftA2 f x y =
+    EvalStackT' $
+      liftA2 (liftA2 f)
+             (runEvalStackT' x)
+             (runEvalStackT' y)
+
+instance Monad m => Monad (EvalStackT' m t) where
+  x >>= f = EvalStackT' $ runEvalStackT' x >>= \case
+                EvalFail s -> return (EvalFail s)
+                EvalSuccess y -> runEvalStackT' $ f y
+
 evalMaybe :: EvalStatus -> t -> Maybe a -> EvalStack' t a
 evalMaybe s t Nothing  = evalFail s t
 evalMaybe _ _ (Just x) = EvalSuccess x
@@ -483,6 +603,14 @@ evalMaybe _ _ (Just x) = EvalSuccess x
 evalFail :: EvalStatus -> t -> EvalStack' t a
 evalFail s t = EvalFail [(s,t)]
 evalFail' s = evalFail s . pure . Context (Internal_ "??")
+
+evalMaybeM :: AMConstraint m => EvalStatus -> t -> Maybe a -> EvalStackT' m t a
+evalMaybeM s t Nothing  = evalFailM s t
+evalMaybeM _ _ (Just x) = return x
+
+evalFailM :: AMConstraint m => EvalStatus -> t -> EvalStackT' m t a
+evalFailM s t = EvalStackT' . pure $ EvalFail [(s,t)]
+evalFailM' s = evalFailM s . pure . Context (Internal_ "??")
 
 match :: Program -> [Context] -> [(Int,Int,Strategy)]
 match (Program _ idx) t = idx t
@@ -511,6 +639,21 @@ evaluateContext prog entity =
     ([],[])   -> evalFail EvalUndefined  entity
     ([],_)    -> evalFail EvalBadInitial entity
 
+evaluateContextM :: AMConstraint m => Program -> [Context] -> EvalStackT m
+evaluateContextM _ [Context c [Compound [x, y], z]]
+    | x == atomDup && z == termTerm
+        = return [Context c [z, y, Compound [x, y]]]
+evaluateContextM _ [Context c [z, y, Compound [x, y']]]
+    | x == atomDup && z == termTerm && y == y'
+        = return [Context c [Compound [x, y], z]]
+evaluateContextM prog entity =
+  case partition haltp (match prog entity) of
+    (_:_,[_]) -> evaluateM' prog (-1) entity
+    (_:_,[])  -> return entity
+    (_:_,_)   -> evalFailM EvalAmbiguous  entity
+    ([],[])   -> evalFailM EvalUndefined  entity
+    ([],_)    -> evalFailM EvalBadInitial entity
+
 haltp (_,_,StratHalt _) = True
 haltp _                 = False
 
@@ -532,9 +675,27 @@ evaluate' prog prev entity =
     go n s = eval prog s entity >>= evaluate' prog n
     successor (_,n,_) = n == prev
 
+evaluateM' :: AMConstraint m => Program -> Int -> [Context] -> EvalStackT m
+evaluateM' prog prev entity =
+  case partition haltp (match prog entity) of
+    (_:_,[])                                -> return entity
+    (_,[(m,m',s)])             | m' == prev -> return entity
+                               | otherwise  -> go m s
+    ([],[(m,m',s1),(n,n',s2)]) | m' == prev -> go n s2
+                               | n' == prev -> go m s1
+    (xs,ys)                    | any successor (xs ++ ys)
+                                            -> evalFailM EvalAmbiguous entity
+    ([],[])                                 -> evalFailM EvalStuck     entity
+    _                                       -> evalFailM EvalCorrupt   entity
+  where
+    go _ (StratHalt _) = return entity
+    go n s = evalM prog s entity >>= evaluateM' prog n
+    successor (_,n,_) = n == prev
+
 eval :: Program -> Strategy -> [Context] -> EvalStack
 -- eval _ s e | trace ("eval: " ++ show (s,e)) False = undefined
 eval _    (StratHalt _)                 lent = pure lent
+eval _    (StratMagic _ _     _    _)   lent = evalFail EvalNonMonadic lent
 eval prog (Strategy lhs rules plan rhs) lent =
   do
     lvars <- evalMaybe (EvalUnification lhs) lent $ unify ishp lhs lent
@@ -559,15 +720,60 @@ eval prog (Strategy lhs rules plan rhs) lent =
                           $ unify ishp patt ent >>= mapMergeDisjoint mvars'
             _ -> evalFail EvalCorrupt (cv v [t])
 
+evalM :: AMConstraint m => Program -> Strategy -> [Context] -> EvalStackT m
+evalM _    (StratHalt _)                 lent = pure lent
+evalM prog (StratMagic lhs _ execute rhs) lent = 
+  do
+    lvars <- evalMaybeM (EvalUnification lhs) lent $ unify ishp lhs lent
+    rvars <- execute lent lvars
+    (vars0,rent) <- subAllRun1M prog rvars rhs
+    if M.null vars0 then return rent else evalFailM (EvalUnconsumed vars0) rent
+  where
+    ishp = isHalting prog
+evalM prog (Strategy lhs rules plan rhs) lent =
+  do
+    lvars <- evalMaybeM (EvalUnification lhs) lent $ unify ishp lhs lent
+    rvars <- foldM execute lvars plan'
+    (vars0,rent) <- subAllRun1M prog rvars rhs
+    -- trace ("eval': " ++ show (lent,rent)) $
+    if M.null vars0 then return rent else evalFailM (EvalUnconsumed vars0) rent
+  where
+    ishp = isHalting prog
+    goPlan ridx = let (Context (Var v) patt) = rules ! ridx in (v, patt)
+    plan' = map (either2 goPlan) plan
+    cv v p = [Context (Var v) p]
+
+    -- execute v c | trace ("evalx: " ++ show(lent,v,c)) False = undefined
+    execute mvars (False, (v, patt)) =
+      do (mvars',ent) <- subAllRunM prog mvars patt
+         return $ M.insert v (Compound ent) mvars'
+    execute mvars (True,  (v, patt)) =
+      do (mvars',t)   <- evalMaybeM EvalCorrupt (cv v patt) $ subAll mvars (Var v)
+         case t of
+            Compound ent -> evalMaybeM (EvalUnification $ cv v patt) (cv v ent)
+                          $ unify ishp patt ent >>= mapMergeDisjoint mvars'
+            _ -> evalFailM EvalCorrupt (cv v [t])
+
 evaluateRec :: Program -> [Context] -> EvalStack
 evaluateRec prog = mapM goc
   where
     goc (Context c ent) = go (Compound ent) >>= \case
                             Compound ent' -> return $ Context c ent'
-                            t            -> evalFail EvalCorrupt [Context c [t]]
+                            t             -> evalFail EvalCorrupt [Context c [t]]
 
     go (Compound ts) = Compound <$> (mapM go ts >>= evaluate prog)
     go x@(Asymm _ _) = evalFail EvalMalformed [Context (Var "") [x]]
+    go x             = return x
+
+evaluateRecM :: AMConstraint m => Program -> [Context] -> EvalStackT m
+evaluateRecM prog = mapM goc
+  where
+    goc (Context c ent) = go (Compound ent) >>= \case
+                            Compound ent' -> return $ Context c ent'
+                            t             -> evalFailM EvalCorrupt [Context c [t]]
+
+    go (Compound ts) = Compound <$> (mapM go ts >>= evaluateM prog)
+    go x@(Asymm _ _) = evalFailM EvalMalformed [Context (Var "") [x]]
     go x             = return x
 
 evaluateLocal' :: ([Context] -> EvalStack) -> [Term] -> EvalStack' [Context] [Term]
@@ -579,5 +785,17 @@ evaluateLocal' eval' ts =
                            | otherwise -> evalFail EvalCorrupt r
         _                              -> evalFail EvalMulti   x
 
+evaluateLocalM' :: AMConstraint m => ([Context] -> EvalStackT m) -> [Term] -> EvalStackT' m [Context] [Term]
+evaluateLocalM' eval' ts =
+    let c = Internal_ "local"
+        x = [Context c ts]
+    in eval' x >>= \case
+        r@[Context c' ts'] | c == c'   -> return ts'
+                           | otherwise -> evalFailM EvalCorrupt r
+        _                              -> evalFailM EvalMulti   x
+
 evaluateRecLocal :: Program -> [Term] -> EvalStack' [Context] [Term]
 evaluateRecLocal = evaluateLocal' . evaluateRec
+
+evaluateRecLocalM :: AMConstraint m => Program -> [Term] -> EvalStackT' m [Context] [Term]
+evaluateRecLocalM = evaluateLocalM' . evaluateRecM

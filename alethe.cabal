@@ -25,6 +25,7 @@ executable alethe
   other-modules:
       Compiler
       Language
+      Magic
       Miscellanea
       Parser
       Paths_alethe
