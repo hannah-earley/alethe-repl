@@ -1,8 +1,11 @@
+{-# LANGUAGE MultiWayIf #-}
+
 module Compiler where
 
 import Language
 import Parser
 import Miscellanea
+import Magic
 
 import Data.Set (Set)
 import qualified Data.Set as S
@@ -15,19 +18,19 @@ import Data.List (nub)
 import Data.Maybe (catMaybes)
 import Data.Either (partitionEithers)
 
-compWith' :: [Definition] -> Either CompilationError [Definition] -> Either CompilationError Program
+compWith' :: [Definition] -> Either [CompilationError] [Definition] -> Either [CompilationError] Program
 compWith' prel = (>>= compile') . fmap (prel++)
 
-compWith :: [Definition] -> [FilePath] -> IO (Either CompilationError Program)
-compWith prel = fmap (compWith' prel) . loadPrograms
+compWith :: [Definition] -> [FilePath] -> IO (Either [CompilationError] Program)
+compWith prel = fmap (compWith' prel . mapLeft pure) . loadPrograms
 
-compile :: [FilePath] -> IO (Either CompilationError Program)
+compile :: [FilePath] -> IO (Either [CompilationError] Program)
 compile = compWith prelude
 
-compile0 :: [FilePath] -> IO (Either CompilationError Program)
+compile0 :: [FilePath] -> IO (Either [CompilationError] Program)
 compile0 = compWith []
 
-compile' :: [Definition] -> Either CompilationError Program
+compile' :: [Definition] -> Either [CompilationError] Program
 compile' ds = fmap mkProg $ cVar ds >> cAmbi ds >> tgSolves (ds)
 
 mkProg :: [(Int,Int,Strategy)] -> Program
@@ -35,25 +38,26 @@ mkProg xs = Program xs (searchIndexProg $ buildIndexProg xs)
 
 -- phase 1: variable conflict and context scope checks
 
-cVar :: [Definition] -> Either CompilationError ()
+cVar :: [Definition] -> Either [CompilationError] ()
 cVar = handle . filter checkDef
   where
     poolCtxts (Terminus _) = []
+    poolCtxts (MagicBinding l r _) = l ++ r
     poolCtxts (Rule l r d) = l ++ r ++ map _decRule d
     checkCtxt = any (>1) . M.elems . vars'
     checkDef = any checkCtxt . poolCtxts
     handle [] = Right ()
-    handle ds = Left $ VarConflictError ds
+    handle ds = Left $ map VarConflictError ds
 
 -- phase 2: ambiguity checks
 
 -- best case O(n^2), worst O(n^3), average O(n^2)
-cAmbi :: [Definition] -> Either CompilationError ()
+cAmbi :: [Definition] -> Either [CompilationError] ()
 cAmbi defs = handle . map (vdefs !) . nub . concatMap triangles $ halts ++ rules
   where vdefs = V.fromList defs
         (halts,rules) = partitionContexts defs
         handle [] = Right ()
-        handle as = Left $ AmbiguityError as
+        handle as = Left [AmbiguityError as]
 
         p (l,c) (l',c') = l /= l' && compatible c c'
         triangles (l,c) = case promisc $ filter (p (l,c)) rules of
@@ -71,6 +75,7 @@ cAmbi defs = handle . map (vdefs !) . nub . concatMap triangles $ halts ++ rules
 partitionContexts :: [Definition] -> ([(Int,Context)],[(Int,Context)])
 partitionContexts = (concat *** concat) . partitionEithers . zipWith f [0..]
   where f n (Terminus t) = Left [(n,Context (Var "") t)]
+        f n (MagicBinding lhs rhs _) = Right . map (n,) $ lhs ++ rhs
         f n (Rule lhs rhs _) = Right . map (n,) $ lhs ++ rhs
 
 
@@ -116,29 +121,44 @@ tgBuild rules = build S.empty . S.fromList
         assocs' = build (visited `S.union` from) next
 -- now we try to solve for paths from the left node to the right node (and vice-versa);
 -- first we handle the trivially satisfied case of halting states,
-tgSolve :: [l] -> Definition -> Maybe ([(l,l,Strategy)],[l])
+tgSolve :: [l] -> Definition -> Either CompilationError ([(l,l,Strategy)],[l])
 tgSolve (x:y:zs) (Terminus t) = case asplit t of
-    (l,r) | l == r    -> Just ([(x,x,StratHalt l)],(y:zs))
-          | otherwise -> Just ([(x,y,StratHalt l), (y,x,StratHalt r)],zs)
+    (l,r) | l == r    -> Right ([(x,x,StratHalt l)],(y:zs))
+          | otherwise -> Right ([(x,y,StratHalt l), (y,x,StratHalt r)],zs)
 -- then the interesting case of computational rules, in which we build the transition graph
 -- and then apply dijkstra's algorithm to obtain a path of minimal cost between the left and
 -- right nodes (nl and nr), or else fail
-tgSolve (x:y:zs) (Rule l r d) =
+tgSolve (x:y:zs) r_@(Rule l r d) = maybe (Left $ ReversibilityError r_) Right $
   do (_,pl1) <- dijkstra (M.fromList $ tgBuild d [nl,nr]) nl nr
      let pl2 = reverse $ map flipEither pl1
      return ([(x,y,Strategy l1 vc pl1 r1), (y,x,Strategy l2 vc pl2 r2)], zs)
   where (nl,l1,r2) = varsplit l
         (nr,l2,r1) = varsplit r
         vc = V.fromList $ map _decRule d
-tgSolve _ _ = Nothing
+tgSolve (x:y:zs) r_@(MagicBinding l r m) =
+  case magicLookup m of
+    Nothing -> Left $ MagicIncantationError r_
+    Just (MagicRule l' r' f b h) ->
+      if | not (S.isSubsetOf l' nl && S.isSubsetOf r' nr) ->
+             if S.isSubsetOf l' nr && S.isSubsetOf r' nl
+               then tgSolve (x:y:zs) (MagicBinding r l m)
+               else Left $ MagicIncantationError r_
+         | nl S.\\ l' /= nr S.\\ r' ->
+             Left $ UnknownCompilationError (unlines [show nl, show nr, show l', show r']) -- ReversibilityError r_
+         | otherwise ->
+             Right ([(x,y,StratMagic l1 h f r1), (y,x,StratMagic l2 h b r2)], zs)
+  where (nl,l1,r2) = varsplit l
+        (nr,l2,r1) = varsplit r
+tgSolve [_] _ = Left $ UnknownCompilationError "tgSolve: ran out of labels"
+tgSolve [] _ = Left $ UnknownCompilationError "tgSolve: ran out of labels"
 -- finally, solve for _all_ rules, and report which rules (if any) fail
-tgSolves :: [Definition] -> Either CompilationError [(Int,Int,Strategy)]
-tgSolves = mapLeft ReversibilityError . fmap concat . combineEithers . go [0..]
+tgSolves :: [Definition] -> Either [CompilationError] [(Int,Int,Strategy)]
+tgSolves = fmap concat . combineEithers . go [0..]
   where
     go _ []      = []
     go ns (d:ds) = case tgSolve ns d of
-                     Nothing        -> Left d   : go ns  ds
-                     Just (xs, ns') -> Right xs : go ns' ds
+                     Left e          -> Left e   : go ns  ds
+                     Right (xs, ns') -> Right xs : go ns' ds
 
 -- phase 4: fast pattern lookups by building a trie-like structure...
 
@@ -148,9 +168,11 @@ buildIndexProg xs = buildIndexCtxt . catMaybes $ zipWith f xs xs
     emp = Context (Var "")
     f (_,_,StratHalt ts)       s = Just (emp ts, s)
     f (_,_,Strategy [x] _ _ _) s = Just (x,      s)
-    f _                        _ = Nothing
+    f (_,_,Strategy _ _ _ _)   _ = Nothing
       -- we don't support multiparty rules yet, see the below comment
       -- for a sketch of what to do when we do...
+    f (_,_,StratMagic [x] _ _ _) s = Just (x,      s)
+    f (_,_,StratMagic _ _ _ _)   _ = Nothing
 
 searchIndexProg :: IndexCtxt (Int,Int,Strategy) -> [Context] -> [(Int,Int,Strategy)]
 searchIndexProg idx [c] = searchIndexCtxt idx c

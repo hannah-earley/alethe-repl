@@ -13,6 +13,7 @@ import Control.Exception (bracket)
 import Data.Set (Set)
 import qualified Data.Set as S
 import qualified Data.Map.Strict as M
+import qualified Data.List as L
 
 import System.Posix.Files as F
 import System.Posix.Types (DeviceID, FileID, Fd)
@@ -29,7 +30,7 @@ import Miscellanea
 
 lexer = T.makeTokenParser aletheStyle
 aletheStyle = haskellStyle
-               { T.reservedNames   = [ "import", "data", "_", "=" ]
+               { T.reservedNames   = [ "import", "data", "magic", "_", "=" ]
                , T.reservedOpNames = [ "=" ]
                , T.identStart      = nota reservedIdStart
                , T.identLetter     = nota reservedIdLetter
@@ -224,6 +225,20 @@ subDecls col = partitionEithers . join <$> many (offside col >> decl)
 defn :: Monad m => Parser m [Definition]
 defn = decl >>= either (const $ unexpected "declaration") return . sequence
 
+magic :: Monad m => Parser m [Definition]
+magic = do reserved "magic"
+           magName <- stringLiteral
+           (ts, defns) <- L.partition isTerm <$> defn
+           case defns of
+             [Rule l r []] -> return (MagicBinding l r magName : ts)
+             (Rule _ _ (_:_) : _) -> unexpected "sub-rule in magic binding"
+             (_:_:_) -> unexpected "multiple rules in magic binding"
+             [_] -> parserFail "internal parser error in magic binding"
+             [] -> parserFail "missing magic binding"
+  where
+    isTerm (Terminus _) = True
+    isTerm _ = False
+
 imprt :: Parser IO [Definition]
 imprt = reserved "import" *> stringLiteral <* semi >>= subParse
 
@@ -242,11 +257,17 @@ datum' t = halts ++ [mkDef . concat $ zipWith go ps vs]
         opt = Compound [atomDup, t']
         mkDef = Rule [Context p0 [opt, termTerm]] [Context p0 [termTerm, t'', opt]]
 
+specialSafe :: Monad m => Parser m [Definition]
+specialSafe = magic <|> datum
+
+special :: Parser IO [Definition]
+special = imprt <|> specialSafe
+
 prog :: Parser IO [Definition]
-prog = whiteSpace >> concat <$> manyTill (imprt <|> datum <|> defn) eof
+prog = whiteSpace >> concat <$> manyTill (special <|> defn) eof
 
 progSafe :: Monad m => Parser m [Definition]
-progSafe = whiteSpace >> concat <$> manyTill (datum <|> defn) eof
+progSafe = whiteSpace >> concat <$> manyTill (specialSafe <|> defn) eof
 
 -- file level parsing
 

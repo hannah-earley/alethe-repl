@@ -56,9 +56,10 @@ goEval t = do progr <- program <$> get
                     putStrLn $ "Couldn't substitute the variable(s) "
                                ++ showMany ", " (Var <$> vs)
                     return Nothing
-                Right t' ->
-                  let x = evaluateRecLocal progr t'
-                  in liftIO (print x) >> case x of
+                Right t' -> liftIO $ do
+                  x <- runEvalStackT' $ evaluateRecLocalM progr t'
+                  print x
+                  case x of
                     EvalSuccess t'' -> return $ Just t''
                     _               -> return $ Nothing
 
@@ -72,7 +73,7 @@ goMatch p t = do progr <- program <$> get
 load :: [FilePath] -> EnvIO ()
 load files = do modify $ \e -> e { program = emptyProgram, sources = files }
                 liftIO (compile files) >>= \case
-                    Left  e -> liftIO . putStrLn $ show e
+                    Left  e -> liftIO . putStrLn . show $ sce e
                     Right p -> modify (\e -> e { program = p })
 
 showGarb :: [String] -> Map String Term -> String
