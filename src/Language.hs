@@ -57,15 +57,12 @@ data Definition = Terminus [Term]
                 | MagicBinding { _defLPatt :: [Context]
                                , _defRPatt :: [Context]
                                , _defMagicName :: String }
-                -- deriving (Eq,Ord)
 
 data Declaration = Declaration { _decWeight :: Int
                                , _decRule   :: Context }
-                   -- deriving (Eq,Ord)
 
 data Context = Context { _cOHC  :: Term
                        , _cTerm :: [Term]}
-               -- deriving (Eq,Ord)
 
 -- display, sugar, properties, etc
 
@@ -151,6 +148,8 @@ atomZero = atom "Z"
 atomSucc = atom "S"
 atomNil = atom "Nil"
 atomCons = atom "Cons"
+atomTrue = atom "True"
+atomFalse = atom "False"
 atomDup = atom "Dup"
 atomPlus = atom "Plus"
 atomMinus = atom "Minus"
@@ -522,6 +521,7 @@ data EvalStatus = EvalOk
                 | EvalStuck
                 | EvalUnification  [Context]
                 | EvalSubstitution (Map String Term)
+                | EvalVarConflict  [String]
                 | EvalUnconsumed   (Map String Term)
                 | EvalAmbiguous
                 | EvalUndefined
@@ -529,7 +529,6 @@ data EvalStatus = EvalOk
                 | EvalMalformed
                 | EvalMulti
                 | EvalCorrupt
-                | EvalNonMonadic
                 | EvalWrongMonad
                 | EvalOther String
 
@@ -537,6 +536,7 @@ instance Show EvalStatus where
     show EvalOk        = "Evaluation successfully halted."
     show EvalStuck     = "No successor found, evaluation stuck."
     show (EvalUnification c) = "Couldn't unify against " ++ showCtxts c ++ "."
+    show (EvalVarConflict v) = "Conflicting variable bindings {" ++ intercalate "," v ++ "}."
     show (EvalSubstitution v) = "Couldn't substitute using {\n" ++ showVars v ++ "}."
     show (EvalUnconsumed v) = "Incomplete substitution, {\n" ++ showVars v ++ "}."
     show EvalAmbiguous = "Non-determinism encountered, successor state is ambiguous."
@@ -545,7 +545,6 @@ instance Show EvalStatus where
     show EvalMalformed = "Malformed input, perhaps an unexpected variable or asymmetry."
     show EvalMulti     = "Multiple parties encountered, this is not supported."
     show EvalCorrupt   = "Unexpected internal error..."
-    show EvalNonMonadic = "Attempting to evaluate monadic rule in non monadic context (likely cause: magic rule)"
     show EvalWrongMonad = "Attempting to evaluate monadic rule in wrong monadic context (likely cause: magic rule requiring IO)"
     show (EvalOther e) = e
 
@@ -695,7 +694,14 @@ evaluateM' prog prev entity =
 eval :: Program -> Strategy -> [Context] -> EvalStack
 -- eval _ s e | trace ("eval: " ++ show (s,e)) False = undefined
 eval _    (StratHalt _)                 lent = pure lent
-eval _    (StratMagic _ _     _    _)   lent = evalFail EvalNonMonadic lent
+eval prog (StratMagic lhs _ execute rhs) lent = 
+  do
+    lvars <- evalMaybe (EvalUnification lhs) lent $ unify ishp lhs lent
+    rvars <- runIdentity . runEvalStackT' $ execute lent lvars
+    (vars0,rent) <- subAllRun1 prog rvars rhs
+    if M.null vars0 then return rent else evalFail (EvalUnconsumed vars0) rent
+  where
+    ishp = isHalting prog
 eval prog (Strategy lhs rules plan rhs) lent =
   do
     lvars <- evalMaybe (EvalUnification lhs) lent $ unify ishp lhs lent
